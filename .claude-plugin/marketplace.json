@@ -1,0 +1,18 @@
+{
+  "name": "claude-bot-local",
+  "description": "Local marketplace for claude-bot plugin",
+  "owner": {
+    "name": "Michael Slain"
+  },
+  "plugins": [
+    {
+      "name": "claude-bot",
+      "version": "0.1.0",
+      "description": "Persistent Claude Code agent with long-term memory, cron jobs, and messaging adapters",
+      "source": "./",
+      "author": {
+        "name": "Michael Slain"
+      }
+    }
+  ]
+}

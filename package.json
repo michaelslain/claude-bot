@@ -1,0 +1,14 @@
+{
+  "name": "claude-bot",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.96",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}
