@@ -12,7 +12,7 @@ claude plugin marketplace add .
 claude plugin install claude-bot@claude-bot-local
 ```
 
-Then restart Claude Code and run:
+Restart Claude Code, then run:
 
 ```
 /claude-bot:setup
