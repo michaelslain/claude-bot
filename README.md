@@ -1,8 +1,10 @@
 # claude-bot
 
-> Persistent Claude Code agent with long-term memory, cron jobs, and a background daemon
+> Turn Claude Code into a personal assistant that never forgets
 
-Your AI assistant that actually remembers. claude-bot runs a persistent Claude Code session as a background daemon, with an Obsidian-style memory graph that persists across all sessions and restarts. Ask it about your projects, deadlines, and decisions from any Claude Code session — it knows the context.
+claude-bot is a Claude Code plugin that gives you a persistent AI assistant with long-term memory. It remembers your projects, preferences, people, and decisions across every session — and runs scheduled tasks in the background even when you're not using it.
+
+It's not just for coding. Ask it about your week, your deadlines, your notes. It knows you.
 
 ---
 
