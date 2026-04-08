@@ -25,13 +25,23 @@ export interface BotResponse {
   sessionId: string
 }
 
-export async function sendMessage(message: string): Promise<BotResponse> {
+export interface SendOptions {
+  model?: string
+  effort?: string
+}
+
+export async function sendMessage(message: string, opts?: SendOptions): Promise<BotResponse> {
   const existingSessionId = await getSessionId()
 
   const options: Record<string, unknown> = {
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     cwd: BOT_DIR,
+    model: opts?.model ?? "haiku",
+  }
+
+  if (opts?.effort) {
+    options.thinkingBudget = opts.effort === "high" ? "high" : opts.effort === "low" ? "low" : "medium"
   }
 
   if (existingSessionId) {

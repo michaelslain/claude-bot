@@ -68,6 +68,8 @@ schedule: 0 9 * * *
 catchup: true
 notify: true
 enabled: true
+model: sonnet
+effort: medium
 ---
 
 Summarize what happened yesterday. Check memory for context.
@@ -79,6 +81,8 @@ Standard 5-field cron expressions. The daemon checks every 60 seconds and fires 
 |-------------|---------|-------------|
 | `name` | filename | Job name |
 | `schedule` | required | 5-field cron expression |
+| `model` | `haiku` | Model: `opus`, `sonnet`, `haiku` |
+| `effort` | | Thinking effort: `low`, `medium`, `high` |
 | `catchup` | `false` | Fire once on wake if missed while asleep |
 | `notify` | `false` | macOS notification on completion/failure |
 | `enabled` | `true` | Set to `false` to disable without deleting |

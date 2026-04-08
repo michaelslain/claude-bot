@@ -22,39 +22,35 @@ Restart Claude Code, then run:
 
 claude-bot runs a persistent Claude Code session as a background daemon via launchd. It has an Obsidian-style memory graph that persists across all sessions and restarts. Any Claude Code session can talk to it, save memories, and trigger cron jobs.
 
-## MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `remember` | Save a note to the memory graph |
-| `recall` | Search memory (tag:, type:, keyword:, link:, after:, before:) |
-| `forget` | Remove a memory note |
-| `message_bot` | Send a message to the persistent bot session |
-| `dream_run` | Trigger memory consolidation |
-| `dream_status` | Get dreaming config |
-| `dream_config` | Update dreaming interval/enabled |
-| `status` | Daemon status, session ID, note count, cron jobs |
-| `setup` | First-time install (creates dirs, plist, starts daemon) |
-| `restart` | Restart the daemon |
-| `stop` | Stop the daemon |
-| `uninstall` | Remove the daemon (preserves memory) |
+The bot remembers everything — your projects, preferences, people, deadlines. Ask it from any session and it knows the context.
 
 ## Examples
 
-### Talk to the bot
+### Ask the bot about your work
 
 ```
-message_bot({ message: "What do you remember about me?" })
+message_bot({ message: "What tasks are due this week?" })
+message_bot({ message: "Summarize the status of project atlas" })
+message_bot({ message: "What did I decide about the auth migration?" })
 ```
 
-### Save a memory
+### Use a specific model or effort level
+
+```
+message_bot({ message: "Deep review of my architecture decisions", model: "opus", effort: "high" })
+message_bot({ message: "Quick status check", model: "haiku", effort: "low" })
+```
+
+Default model is `haiku`. Options: `opus`, `sonnet`, `haiku`. Effort: `low`, `medium`, `high`.
+
+### Save things to remember
 
 ```
 remember({
-  name: "project-deadline",
+  name: "atlas-deadline",
   type: "project",
   tags: ["work", "urgent"],
-  content: "Ship v2 by Friday. [[client-acme]] is waiting."
+  content: "Ship project atlas by Friday. [[alice]] is waiting on the API."
 })
 ```
 
@@ -62,7 +58,8 @@ remember({
 
 ```
 recall({ query: "type:project tag:urgent" })
-recall({ query: "acme deadline" })
+recall({ query: "alice deadline" })
+recall({ query: "type:person" })
 ```
 
 ### Cron jobs
@@ -71,21 +68,43 @@ Persistent file-based crons at `~/.claude-bot/crons/*.md`:
 
 ```markdown
 ---
-name: morning-summary
+name: morning-briefing
 schedule: 0 9 * * *
 catchup: true
 notify: true
+model: sonnet
+effort: medium
 ---
 
-Summarize what happened yesterday. Check memory for context.
+Check memory for my current projects, upcoming deadlines, and open tasks.
+Give me a brief morning summary of what I should focus on today.
 ```
 
-| Frontmatter | Description |
-|-------------|-------------|
-| `schedule` | Standard 5-field cron expression |
-| `catchup` | If `true`, fires once on wake if missed while asleep |
-| `notify` | If `true`, sends macOS notification on completion |
-| `enabled` | Set to `false` to disable without deleting |
+| Frontmatter | Default | Description |
+|-------------|---------|-------------|
+| `schedule` | required | Standard 5-field cron expression |
+| `model` | `haiku` | Model: `opus`, `sonnet`, `haiku` |
+| `effort` | | Thinking effort: `low`, `medium`, `high` |
+| `catchup` | `false` | Fire once on wake if missed while asleep |
+| `notify` | `false` | macOS notification on completion |
+| `enabled` | `true` | Set to `false` to disable without deleting |
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `remember` | Save a note to the memory graph |
+| `recall` | Search memory (tag:, type:, keyword:, link:, after:, before:) |
+| `forget` | Remove a memory note |
+| `message_bot` | Send a message to the bot (supports model/effort params) |
+| `dream_run` | Trigger memory consolidation |
+| `dream_status` | Get dreaming config |
+| `dream_config` | Update dreaming interval/enabled |
+| `status` | Daemon status, session ID, note count, cron jobs |
+| `setup` | First-time install (creates dirs, plist, starts daemon) |
+| `restart` | Restart the daemon |
+| `stop` | Stop the daemon |
+| `uninstall` | Remove the daemon (preserves memory) |
 
 ## Architecture
 

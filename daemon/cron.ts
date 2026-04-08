@@ -29,6 +29,8 @@ export interface CronJob {
   catchup: boolean
   enabled: boolean
   notify: boolean
+  model?: string
+  effort?: string
 }
 
 export function parseCronExpression(expr: string): CronExpression | null {
@@ -127,7 +129,9 @@ export async function loadCronJobs(): Promise<CronJob[]> {
       const catchup = frontmatter.catchup === "true"
       const enabled = frontmatter.enabled !== "false"  // default true
       const notify = frontmatter.notify === "true"
-      jobs.push({ name, schedule, cron, prompt: body, catchup, enabled, notify })
+      const model = frontmatter.model
+      const effort = frontmatter.effort
+      jobs.push({ name, schedule, cron, prompt: body, catchup, enabled, notify, model, effort })
     } catch {
       // skip unreadable files
     }
@@ -172,7 +176,7 @@ function shouldCatchUp(job: CronJob, lastFired: Record<string, string>): boolean
 async function fireJob(job: CronJob, lastFired: Record<string, string>): Promise<void> {
   runningJobs.add(job.name)
   try {
-    const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`)
+    const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`, { model: job.model, effort: job.effort })
     lastFired[job.name] = new Date().toISOString()
     await saveLastFired(lastFired)
     if (job.notify) {

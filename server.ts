@@ -355,6 +355,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           message: { type: "string", description: "The message to send to the bot" },
+          model: { type: "string", description: "Model to use: opus, sonnet, haiku (default: haiku)" },
+          effort: { type: "string", description: "Thinking effort: low, medium, high" },
         },
         required: ["message"],
       },
@@ -452,9 +454,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!(await isInstalled())) {
         return toResult({ ok: false, error: "claude-bot is not set up yet. Run /claude-bot:setup or call the setup tool first." })
       }
-      const { message } = args as { message: string }
+      const { message, model, effort } = args as { message: string; model?: string; effort?: string }
       try {
-        const response = await sendMessage(message)
+        const response = await sendMessage(message, { model, effort })
         return toResult({ ok: true, response: response.result, sessionId: response.sessionId })
       } catch (err) {
         return toResult({ ok: false, error: String(err) })
