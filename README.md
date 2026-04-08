@@ -28,47 +28,25 @@ Restart Claude Code, then run `/claude-bot:setup` to personalize your bot.
 
 ## Usage
 
-### Talk to the bot
+Just talk to Claude naturally. The bot tools are available in every Claude Code session.
 
-The bot has full conversation history and remembers everything you've told it.
+> "Ask the bot what tasks are due this week"
+>
+> "Tell the bot I decided to go with Postgres over SQLite"
+>
+> "What does the bot remember about the auth migration?"
+>
+> "Remember that Alice prefers async communication"
+>
+> "Search my memory for anything about project deadlines"
+>
+> "Ask the bot to summarize my current projects — use sonnet for this one"
+>
+> "Run a dream cycle to clean up memory"
+>
+> "What's the bot's status?"
 
-```
-message_bot({ message: "What tasks are due this week?" })
-message_bot({ message: "Summarize the status of project atlas" })
-message_bot({ message: "What did I decide about the auth migration?" })
-```
-
-Choose your model and thinking effort per message:
-
-```
-message_bot({ message: "Deep review of my architecture decisions", model: "opus", effort: "high" })
-message_bot({ message: "Quick status check", model: "haiku", effort: "low" })
-```
-
-> Default model: `haiku` | Options: `opus`, `sonnet`, `haiku` | Effort: `low`, `medium`, `high`
-
-### Save memories
-
-Save anything worth remembering. Notes support `[[backlinks]]` to connect related memories.
-
-```
-remember({
-  name: "atlas-deadline",
-  type: "project",
-  tags: ["work", "urgent"],
-  content: "Ship project atlas by Friday. [[alice]] is waiting on the API."
-})
-```
-
-### Search memory
-
-```
-recall({ query: "type:project tag:urgent" })
-recall({ query: "alice deadline" })
-recall({ query: "type:person" })
-```
-
-Supports: `tag:`, `type:`, `keyword:`, `link:`, `after:`, `before:` — and combinations.
+The default model is `haiku`. You can ask for `opus` or `sonnet` when you need more depth.
 
 ---
 
@@ -90,51 +68,34 @@ Check memory for my current projects, upcoming deadlines, and open tasks.
 Give me a brief morning summary of what I should focus on today.
 ```
 
-| Frontmatter | Default | Description |
-|-------------|---------|-------------|
-| `name` | filename | Job name |
-| `schedule` | required | 5-field cron expression |
-| `model` | `haiku` | Model: `opus`, `sonnet`, `haiku` |
-| `effort` | | Thinking effort: `low`, `medium`, `high` |
-| `catchup` | `false` | Fire once on wake if missed while asleep |
-| `notify` | `false` | macOS notification on completion/failure |
-| `enabled` | `true` | Set to `false` to disable without deleting |
+| Frontmatter | Default  | Description                                |
+| ----------- | -------- | ------------------------------------------ |
+| `name`      | filename | Job name                                   |
+| `schedule`  | required | 5-field cron expression                    |
+| `model`     | `haiku`  | Model: `opus`, `sonnet`, `haiku`           |
+| `effort`    |          | Thinking effort: `low`, `medium`, `high`   |
+| `catchup`   | `false`  | Fire once on wake if missed while asleep   |
+| `notify`    | `false`  | macOS notification on completion/failure   |
+| `enabled`   | `true`   | Set to `false` to disable without deleting |
 
 ---
 
 ## MCP Tools
 
-### Memory
-
-| Tool | Description |
-|------|-------------|
-| `remember` | Save a note to the memory graph |
-| `recall` | Search memory with filters |
-| `forget` | Remove a memory note |
-
-### Bot
-
-| Tool | Description |
-|------|-------------|
-| `message_bot` | Send a message to the bot (supports model/effort) |
-| `status` | Daemon status, session ID, note count, cron jobs |
-
-### Dreaming
-
-| Tool | Description |
-|------|-------------|
-| `dream_run` | Trigger memory consolidation |
-| `dream_status` | Get dreaming config |
-| `dream_config` | Update dreaming interval/enabled |
-
-### Daemon
-
-| Tool | Description |
-|------|-------------|
-| `setup` | First-time install via launchd |
-| `restart` | Restart the daemon |
-| `stop` | Stop the daemon |
-| `uninstall` | Remove daemon (preserves memory) |
+| Tool           | Description                                   |
+| -------------- | --------------------------------------------- |
+| `remember`     | Save a note to the memory graph               |
+| `recall`       | Search memory with filters                    |
+| `forget`       | Remove a memory note                          |
+| `message_bot`  | Send a message to the bot                     |
+| `dream_run`    | Trigger memory consolidation                  |
+| `dream_status` | Get dreaming config                           |
+| `dream_config` | Update dreaming interval/enabled              |
+| `status`       | Bot status, session ID, note count, cron jobs |
+| `setup`        | First-time install via launchd                |
+| `restart`      | Restart the bot                               |
+| `stop`         | Stop the bot                                  |
+| `uninstall`    | Remove the bot (preserves memory)             |
 
 ---
 
