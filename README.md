@@ -1,10 +1,8 @@
 # claude-bot
 
-> Turn Claude Code into a personal assistant that never forgets
+> Claude Code plugin that turns Claude into your personal assistant
 
-claude-bot is a Claude Code plugin that gives you a persistent AI assistant with long-term memory. It remembers your projects, preferences, people, and decisions across every session — and runs scheduled tasks in the background even when you're not using it.
-
-It's not just for coding. Ask it about your week, your deadlines, your notes. It knows you.
+Long-term memory, scheduled tasks, and a background daemon. Not just for coding — ask it about your week, your deadlines, your notes. It knows you.
 
 ---
 
