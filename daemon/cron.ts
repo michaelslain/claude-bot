@@ -2,16 +2,10 @@ import { homedir } from "os"
 import { join } from "path"
 import { readdir, readFile, writeFile } from "fs/promises"
 import { sendMessage } from "./session"
+import { notify } from "../lib/platform"
 
 const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
 const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
-
-function notify(title: string, message: string): void {
-  try {
-    const escaped = message.replace(/"/g, '\\"').replace(/\n/g, " ").slice(0, 200)
-    Bun.spawnSync(["osascript", "-e", `display notification "${escaped}" with title "${title}"`])
-  } catch {}
-}
 
 export interface CronExpression {
   minute: string

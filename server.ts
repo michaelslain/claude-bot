@@ -12,10 +12,10 @@ import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
 import { today } from "./lib/json.ts"
+import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
 import { homedir } from "os"
 import { join } from "path"
 import { mkdir } from "fs/promises"
-import { spawnSync } from "child_process"
 
 // ── Tool result helper ────────────────────────────────────────────────────────
 
@@ -28,8 +28,7 @@ function toResult(data: unknown) {
 // ── Setup ────────────────────────────────────────────────────────────────────
 
 const BOT_DIR = join(homedir(), ".claude-bot")
-const LABEL = "com.claude-bot.daemon"
-const PLIST_PATH = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`)
+const DAEMON_PATH = daemonConfigPath()
 const SERVER_PATH = join(import.meta.dir, "server.ts")
 
 function buildPath(): string {
@@ -115,7 +114,7 @@ ALWAYS recall before answering:
 `
 
 async function isInstalled(): Promise<boolean> {
-  return Bun.file(PLIST_PATH).exists()
+  return Bun.file(DAEMON_PATH).exists()
 }
 
 async function getDaemonPid(): Promise<number | null> {
@@ -127,30 +126,14 @@ async function getDaemonPid(): Promise<number | null> {
   return null
 }
 
-function generatePlist(): string {
-  const bunPath = Bun.which("bun") ?? "/opt/homebrew/bin/bun"
-  const daemonEntry = join(import.meta.dir, "daemon", "index.ts")
-  const logsDir = join(BOT_DIR, "logs")
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>${LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${bunPath}</string>
-        <string>run</string>
-        <string>${daemonEntry}</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict><key>PATH</key><string>${buildPath()}</string></dict>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>${join(logsDir, "claude-bot.stdout.log")}</string>
-    <key>StandardErrorPath</key><string>${join(logsDir, "claude-bot.stderr.log")}</string>
-    <key>WorkingDirectory</key><string>${BOT_DIR}</string>
-</dict>
-</plist>`
+function daemonOpts() {
+  return {
+    bunPath: Bun.which("bun") ?? (process.platform === "darwin" ? "/opt/homebrew/bin/bun" : join(homedir(), ".bun", "bin", "bun")),
+    daemonEntry: join(import.meta.dir, "daemon", "index.ts"),
+    logsDir: join(BOT_DIR, "logs"),
+    workDir: BOT_DIR,
+    envPath: buildPath(),
+  }
 }
 
 async function setupBot(): Promise<{ ok: boolean; message: string }> {
@@ -211,13 +194,10 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
     }, null, 2) + "\n")
   }
 
-  // Write and load plist
-  await Bun.write(PLIST_PATH, generatePlist())
-  const load = spawnSync("launchctl", ["load", PLIST_PATH])
-
-  if (load.status !== 0) {
-    return { ok: false, message: `launchctl load failed: ${load.stderr?.toString() ?? "unknown error"}` }
-  }
+  // Write and load daemon config
+  const config = generateDaemonConfig(daemonOpts())
+  const result = await installDaemon(DAEMON_PATH, config)
+  if (!result.ok) return { ok: false, message: result.error ?? "Failed to install daemon" }
 
   return { ok: true, message: `Installed and started. Bot running in ${BOT_DIR}.` }
 }
@@ -227,14 +207,9 @@ async function restartBot(): Promise<{ ok: boolean; message: string }> {
     return { ok: false, message: "Not installed. Run 'setup' first." }
   }
 
-  // Update plist in case code paths changed
-  await Bun.write(PLIST_PATH, generatePlist())
-  spawnSync("launchctl", ["unload", PLIST_PATH])
-  const load = spawnSync("launchctl", ["load", PLIST_PATH])
-
-  if (load.status !== 0) {
-    return { ok: false, message: `launchctl load failed: ${load.stderr?.toString() ?? "unknown error"}` }
-  }
+  const config = generateDaemonConfig(daemonOpts())
+  const result = reloadDaemon(DAEMON_PATH, config)
+  if (!result.ok) return { ok: false, message: result.error ?? "Failed to restart daemon" }
 
   return { ok: true, message: "Daemon restarted." }
 }
@@ -245,17 +220,17 @@ async function stopBot(): Promise<{ ok: boolean; message: string }> {
     return { ok: false, message: "Daemon is not running." }
   }
 
-  spawnSync("launchctl", ["unload", PLIST_PATH])
+  unloadDaemon(DAEMON_PATH)
   return { ok: true, message: `Daemon stopped (PID ${pid}).` }
 }
 
 async function uninstallBot(): Promise<{ ok: boolean; message: string }> {
-  spawnSync("launchctl", ["unload", PLIST_PATH])
+  unloadDaemon(DAEMON_PATH)
   try {
     const { unlink } = await import("fs/promises")
-    await unlink(PLIST_PATH)
+    await unlink(DAEMON_PATH)
   } catch {}
-  return { ok: true, message: `Uninstalled. Plist removed. Memory and config in ${BOT_DIR} preserved.` }
+  return { ok: true, message: `Uninstalled. Daemon config removed. Memory and config in ${BOT_DIR} preserved.` }
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
@@ -363,7 +338,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "setup",
-      description: "First-time install of claude-bot. Creates ~/.claude-bot/ directory, CLAUDE.md, MCP config, crons, and launchd plist. Only runs once — fails if already installed.",
+      description: "First-time install of claude-bot. Creates ~/.claude-bot/ directory, CLAUDE.md, MCP config, crons, and daemon service. Only runs once — fails if already installed.",
       inputSchema: { type: "object", properties: {}, required: [] },
     },
     {
@@ -378,7 +353,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "uninstall",
-      description: "Uninstall claude-bot. Stops the daemon and removes the launchd plist.",
+      description: "Uninstall claude-bot. Stops the daemon and removes the service config.",
       inputSchema: { type: "object", properties: {}, required: [] },
     },
   ],
