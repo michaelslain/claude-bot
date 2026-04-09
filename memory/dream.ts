@@ -48,6 +48,8 @@ Given the following memory notes (in JSON format), analyze them and return a JSO
 
 3. "delete": an array of note names that are outdated, trivial, or no longer useful (including auto notes with no extractable value)
 
+Memory decay: notes that are old (check the "created" and "updated" dates) AND have no [[backlinks]] to or from other notes are fading memories. If they haven't been updated recently and nothing links to them, they are candidates for deletion — unless the content is genuinely important and timeless. Prefer to delete stale, isolated notes over keeping them. Connected notes (with backlinks) survive longer because they are part of the knowledge graph.
+
 Return ONLY valid JSON. If no changes are needed, return {"merge":[],"improve":[],"delete":[]}.
 
 Memory notes to analyze:
@@ -116,7 +118,7 @@ export async function dream(
 
     let response: string
     try {
-      response = await dispatch(CONSOLIDATION_PROMPT + notesJson)
+      response = await dispatch(CONSOLIDATION_PROMPT + `\n\nToday's date: ${today()}\n\n` + notesJson)
     } catch {
       continue
     }
