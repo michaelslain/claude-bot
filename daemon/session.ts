@@ -2,6 +2,8 @@ import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk"
 import { homedir } from "os"
 import { join } from "path"
 import { readFile, writeFile, mkdir } from "fs/promises"
+import { loadAllNotes } from "../memory/graph"
+import { loadAllNotes } from "../memory/graph"
 
 const BOT_DIR = join(homedir(), ".claude-bot")
 const SESSION_FILE = join(BOT_DIR, "session-id")
@@ -30,8 +32,27 @@ export interface SendOptions {
   effort?: string
 }
 
+async function buildMemoryContext(): Promise<string> {
+  const notes = await loadAllNotes()
+  if (notes.length === 0) return ""
+
+  const lines = ["<memory-graph>"]
+  for (const note of notes) {
+    const { frontmatter: fm, content, backlinks } = note
+    lines.push(`## ${note.name} (${fm.type}) [${fm.tags.join(", ")}]`)
+    lines.push(content)
+    if (backlinks.length > 0) lines.push(`Links: ${backlinks.map(b => `[[${b}]]`).join(", ")}`)
+    lines.push("")
+  }
+  lines.push("</memory-graph>")
+  return lines.join("\n")
+}
+
 export async function sendMessage(message: string, opts?: SendOptions): Promise<BotResponse> {
   const existingSessionId = await getSessionId()
+
+  const memoryContext = await buildMemoryContext()
+  const fullMessage = memoryContext ? `${memoryContext}\n\n${message}` : message
 
   const options: Record<string, unknown> = {
     permissionMode: "bypassPermissions",
@@ -49,7 +70,7 @@ export async function sendMessage(message: string, opts?: SendOptions): Promise<
   }
 
   let latestSessionId = existingSessionId ?? "unknown"
-  const q = claudeQuery({ prompt: message, options: options as any })
+  const q = claudeQuery({ prompt: fullMessage, options: options as any })
   let resultText = ""
 
   for await (const msg of q) {
