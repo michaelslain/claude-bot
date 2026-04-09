@@ -1,5 +1,5 @@
-import { loadAllNotes, readNote, writeNote, deleteNote, getMemoryDir } from "./graph.ts"
-import type { MemoryNote, NoteType } from "./graph.ts"
+import { loadAllNotes, writeNote, deleteNote, getMemoryDir } from "./graph.ts"
+import type { NoteType } from "./graph.ts"
 import { sendMessage } from "../daemon/session.ts"
 import { parseJsonResponse } from "../lib/json.ts"
 import { today } from "../lib/json.ts"
@@ -26,6 +26,12 @@ let currentConfig: DreamConfig = { ...DEFAULT_CONFIG }
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation assistant. You are "dreaming" — reviewing a set of memory notes to improve, deduplicate, and consolidate them.
 
+Notes with type "auto" are raw conversation snippets collected automatically. Your PRIMARY job is to process these:
+- Extract useful facts, preferences, project context, or personal details from auto notes
+- Merge extracted info into existing notes when relevant (e.g., a new preference goes into the existing preferences note)
+- Create new properly-typed notes for genuinely new information
+- Delete auto notes after extracting their value (or delete them outright if they contain nothing useful)
+
 Given the following memory notes (in JSON format), analyze them and return a JSON object with:
 
 1. "merge": an array of merge operations. Each merge has:
@@ -40,7 +46,7 @@ Given the following memory notes (in JSON format), analyze them and return a JSO
    - "updatedContent": improved content (clearer, more concise, better backlinks)
    - "updatedTags": cleaned up tags
 
-3. "delete": an array of note names that are outdated, trivial, or no longer useful
+3. "delete": an array of note names that are outdated, trivial, or no longer useful (including auto notes with no extractable value)
 
 Return ONLY valid JSON. If no changes are needed, return {"merge":[],"improve":[],"delete":[]}.
 

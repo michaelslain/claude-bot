@@ -118,7 +118,10 @@ export async function loadCronJobs(): Promise<CronJob[]> {
       if (!schedule) continue
 
       const cron = parseCronExpression(schedule)
-      if (!cron) continue
+      if (!cron) {
+        console.error(`[cron] Invalid schedule "${schedule}" in ${file}, skipping`)
+        continue
+      }
 
       const catchup = frontmatter.catchup === "true"
       const enabled = frontmatter.enabled !== "false"  // default true

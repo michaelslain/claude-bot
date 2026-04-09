@@ -6,6 +6,14 @@ import { readFile, writeFile, mkdir } from "fs/promises"
 const BOT_DIR = join(homedir(), ".claude-bot")
 const SESSION_FILE = join(BOT_DIR, "session-id")
 
+/** Messages emitted by the Claude Agent SDK query stream. */
+interface SdkMessage {
+  type?: string
+  subtype?: string
+  session_id?: string
+  result?: string
+}
+
 export async function getSessionId(): Promise<string | undefined> {
   try {
     const id = (await readFile(SESSION_FILE, "utf-8")).trim()
@@ -49,21 +57,20 @@ export async function sendMessage(message: string, opts?: SendOptions): Promise<
   }
 
   let latestSessionId = existingSessionId ?? "unknown"
-  const q = claudeQuery({ prompt: message, options: options as any })
+  // The SDK types are incomplete — cast options once at the boundary
+  const q = claudeQuery({ prompt: message, options: options as Parameters<typeof claudeQuery>[0]["options"] })
   let resultText = ""
 
-  for await (const msg of q) {
-    if ((msg as any).session_id) {
-      latestSessionId = (msg as any).session_id
+  for await (const event of q) {
+    const msg = event as SdkMessage
+    if (msg.session_id && msg.session_id !== latestSessionId) {
+      latestSessionId = msg.session_id
       await saveSessionId(latestSessionId)
     }
-    if ((msg as any).type === "result" && (msg as any).subtype === "success") {
-      resultText = ((msg as any).result ?? "").trim()
+    if (msg.type === "result" && msg.subtype === "success") {
+      resultText = (msg.result ?? "").trim()
     }
   }
 
-  const sessionId = latestSessionId
-  const result = resultText
-
-  return { result, sessionId }
+  return { result: resultText, sessionId: latestSessionId }
 }

@@ -22,7 +22,9 @@ Restart Claude Code, then run `/claude-bot:setup` to personalize your bot.
 
 - [Bun](https://bun.sh) runtime
 - [Claude CLI](https://claude.ai/download) installed and authenticated
-- macOS (uses launchd for daemon management)
+- **macOS:** launchd (automatic)
+- **Linux:** systemd (automatic)
+- **Windows:** Not yet supported
 
 ---
 
@@ -114,9 +116,11 @@ updated: 2026-04-08
 Alice is the tech lead on [[project-atlas]]. Prefers async communication.
 ```
 
-**Note types:** `person` `project` `workflow` `fact` `preference` `daily`
+**Note types:** `person` `project` `workflow` `fact` `preference` `daily` `auto`
 
-**Dreaming** consolidates memory automatically — merging duplicates, improving notes, removing stale entries. Runs as a cron (default: every 6 hours) or manually via `dream_run`.
+`auto` notes are created by the automatic prompt collector — raw conversation snippets that dreaming processes and consolidates into typed notes.
+
+**Dreaming** consolidates memory automatically — merging duplicates, improving notes, extracting value from `auto` notes, removing stale entries. Runs hourly via cron or manually via `dream_run`.
 
 ---
 

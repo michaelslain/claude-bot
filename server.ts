@@ -62,7 +62,7 @@ remember({ name: "user-prefers-dark-mode", type: "preference", tags: ["ui"], con
 Parameters:
 - \`name\` (required): kebab-case filename for the note
 - \`content\` (required): markdown content, can include [[backlinks]] to other notes
-- \`type\`: one of person, project, workflow, fact, preference, daily (default: fact)
+- \`type\`: one of person, project, workflow, fact, preference, daily, auto (default: fact)
 - \`tags\`: array of lowercase tags
 
 ### recall
@@ -170,7 +170,9 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
     }, null, 2) + "\n")
   }
 
-  // Write permissions so bot session can use MCP tools without prompting
+  // Write permissions for the bot's OWN session (runs in ~/.claude-bot/).
+  // This only affects the daemon's agent session, not the user's Claude Code sessions.
+  // The daemon needs bypass to operate autonomously (memory tools, file access, bash for crons).
   const settingsDir = join(BOT_DIR, ".claude")
   await mkdir(settingsDir, { recursive: true })
   const settingsPath = join(settingsDir, "settings.local.json")
@@ -256,7 +258,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           name: { type: "string", description: "Note name (used as filename)" },
           type: {
             type: "string",
-            description: "Note type: person | project | workflow | fact | preference | daily",
+            description: "Note type: person | project | workflow | fact | preference | daily | auto",
           },
           tags: {
             type: "array",
@@ -525,20 +527,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 // Ensure memory hook is registered in global Claude settings
+interface HookEntry { hooks?: Array<{ type?: string; command?: string }> }
+interface ClaudeSettings {
+  hooks?: { UserPromptSubmit?: HookEntry[] }
+  [key: string]: unknown
+}
+
 try {
   const globalSettingsPath = join(homedir(), ".claude", "settings.json")
-  let settings: Record<string, any> = {}
+  let settings: ClaudeSettings = {}
   try {
-    settings = JSON.parse(await Bun.file(globalSettingsPath).text())
-  } catch {}
+    settings = JSON.parse(await Bun.file(globalSettingsPath).text()) as ClaudeSettings
+  } catch {
+    // File may not exist yet — start with empty settings
+  }
 
   const hookCommand = `bun run ${join(import.meta.dir, "bin", "memory-hook.ts")}`
 
   if (!settings.hooks) settings.hooks = {}
   if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = []
 
-  const existing = settings.hooks.UserPromptSubmit.some((entry: any) =>
-    entry.hooks?.some((h: any) => h.command?.includes("memory-hook.ts"))
+  const existing = settings.hooks.UserPromptSubmit.some((entry) =>
+    entry.hooks?.some((h) => h.command?.includes("memory-hook.ts"))
   )
 
   if (!existing) {
@@ -547,7 +557,9 @@ try {
     })
     await Bun.write(globalSettingsPath, JSON.stringify(settings, null, 2) + "\n")
   }
-} catch {}
+} catch (err) {
+  console.error("[server] Failed to register memory hook:", err)
+}
 
 const transport = new StdioServerTransport()
 await server.connect(transport)

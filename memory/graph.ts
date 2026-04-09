@@ -8,7 +8,7 @@ export function getMemoryDir(): string {
   return process.env["CLAUDE_BOT_MEMORY_DIR"] ?? DEFAULT_MEMORY_DIR;
 }
 
-export type NoteType = "person" | "project" | "workflow" | "fact" | "preference" | "daily";
+export type NoteType = "person" | "project" | "workflow" | "fact" | "preference" | "daily" | "auto";
 
 export interface NoteFrontmatter {
   type: NoteType;

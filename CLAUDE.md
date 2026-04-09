@@ -8,8 +8,8 @@ Default to using Bun instead of Node.js. Bun automatically loads .env, so don't 
 
 ### Three layers
 
-1. **MCP Server** (`server.ts`) — provides memory tools (`remember`/`recall`/`forget`), dreaming tools, `message_bot` (talk to the bot), and `setup` (install via launchd). Registered globally so every Claude Code session has access.
-2. **Thin Daemon** (`daemon/`) — Bun process kept alive by launchd. Manages one persistent agent SDK session, runs the cron scheduler. Adapters plug in here later.
+1. **MCP Server** (`server.ts`) — provides memory tools (`remember`/`recall`/`forget`), dreaming tools, `message_bot` (talk to the bot), and `setup` (install via launchd/systemd). Registered globally so every Claude Code session has access.
+2. **Thin Daemon** (`daemon/`) — Bun process kept alive by launchd (macOS) or systemd (Linux). Manages one persistent agent SDK session, runs the cron scheduler. Adapters plug in here later.
 3. **Memory Graph** (`memory/`) — Obsidian-style markdown vault at `~/.claude-bot/memory/` with [[backlinks]], YAML frontmatter, and a query engine.
 
 ### How it works
@@ -44,7 +44,7 @@ Lives at `~/.claude-bot/memory/`. Notes are markdown with YAML frontmatter:
 
 ```markdown
 ---
-type: person | project | workflow | fact | preference | daily
+type: person | project | workflow | fact | preference | daily | auto
 tags: [tag1, tag2]
 created: 2026-04-08
 updated: 2026-04-08
@@ -53,9 +53,13 @@ updated: 2026-04-08
 Content with [[backlinks]] to other notes.
 ```
 
+### Automatic Collection
+
+A `UserPromptSubmit` hook (`bin/collect-hook.ts`) runs on every Claude Code session. It saves user prompts as `type: auto` notes in the memory graph. A junk filter skips short messages, slash commands, and code-heavy prompts. Dreaming consolidates these raw notes into proper typed notes.
+
 ### Dreaming
 
-Memory consolidation uses `sendMessage()` to ask the bot to review notes in batches. Merges duplicates, improves content, removes stale entries. Runs as a cron job (default: every 6 hours) and can be triggered manually via `dream_run`.
+Memory consolidation uses `sendMessage()` to ask the bot to review notes in batches. Merges duplicates, improves content, processes `auto` notes (extracts value or deletes), removes stale entries. Runs as a cron job (default: every hour) and can be triggered manually via `dream_run`.
 
 ## Cron Jobs
 
@@ -103,6 +107,9 @@ claude-bot/
     query.ts          # query parser and executor
     query.test.ts     # tests
     dream.ts          # memory consolidation via bot session
+  bin/
+    memory-hook.ts    # UserPromptSubmit hook: injects relevant memories into context
+    collect-hook.ts   # UserPromptSubmit hook: saves prompts as auto notes
   lib/
     json.ts           # shared JSON parsing, date utils
   skills/
@@ -129,5 +136,5 @@ claude-bot/
 - **Runtime**: Bun
 - **AI**: `@anthropic-ai/claude-agent-sdk`
 - **MCP**: `@modelcontextprotocol/sdk`
-- **Daemon**: launchd (macOS)
+- **Daemon**: launchd (macOS), systemd (Linux)
 - **Memory**: Markdown files with frontmatter

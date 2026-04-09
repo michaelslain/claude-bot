@@ -123,5 +123,7 @@ export function notify(title: string, message: string): void {
       const escaped = trimmed.replace(/"/g, '\\"').replace(/\n/g, " ")
       Bun.spawnSync(["osascript", "-e", `display notification "${escaped}" with title "${title}"`])
     }
-  } catch {}
+  } catch (err) {
+    console.error("[notify]", err)
+  }
 }

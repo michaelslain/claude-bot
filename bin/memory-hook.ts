@@ -33,7 +33,7 @@ try {
   };
 
   process.stdout.write(JSON.stringify(output));
-} catch {
-  // Never block the user's prompt on error
+} catch (err) {
+  console.error("[memory-hook]", err);
   process.exit(0);
 }
