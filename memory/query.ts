@@ -8,6 +8,7 @@ export interface ParsedQuery {
   links: string[];
   after?: string;
   before?: string;
+  keywordMode: "and" | "or";
 }
 
 /**
@@ -30,6 +31,7 @@ export function parseQuery(queryString: string): ParsedQuery {
     types: [],
     keywords: [],
     links: [],
+    keywordMode: "and",
   };
 
   for (const token of tokens) {
@@ -116,8 +118,13 @@ function noteMatchesQuery(note: MemoryNote, query: ParsedQuery): boolean {
       .join(" ")
       .toLowerCase();
 
-    for (const kw of query.keywords) {
-      if (!searchable.includes(kw)) return false;
+    if (query.keywordMode === "or") {
+      const hasAny = query.keywords.some((kw) => searchable.includes(kw));
+      if (!hasAny) return false;
+    } else {
+      for (const kw of query.keywords) {
+        if (!searchable.includes(kw)) return false;
+      }
     }
   }
 

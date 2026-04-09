@@ -7,6 +7,7 @@ import {
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
 import { loadCronJobs } from "./daemon/cron.ts"
+import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
@@ -145,6 +146,7 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
   await mkdir(logsDir, { recursive: true })
   await mkdir(join(BOT_DIR, "memory"), { recursive: true })
   await mkdir(join(BOT_DIR, "crons"), { recursive: true })
+  await mkdir(join(BOT_DIR, "processes"), { recursive: true })
 
   // Write default dream cron (every 6 hours)
   const dreamCronPath = join(BOT_DIR, "crons", "dream.md")
@@ -188,6 +190,9 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
           "mcp__claude-bot-memory__stop",
           "mcp__claude-bot-memory__uninstall",
           "mcp__claude-bot-memory__status",
+          "mcp__claude-bot-memory__process_list",
+          "mcp__claude-bot-memory__process_start",
+          "mcp__claude-bot-memory__process_stop",
           "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)"
         ]
       }
@@ -337,6 +342,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "process_list",
+      description: "List all managed background processes and their status",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "process_start",
+      description: "Start a stopped background process",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the process to start" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "process_stop",
+      description: "Stop a running background process",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the process to stop" },
+        },
+        required: ["name"],
+      },
+    },
+    {
       name: "setup",
       description: "First-time install of claude-bot. Creates ~/.claude-bot/ directory, CLAUDE.md, MCP config, crons, and daemon service. Only runs once — fails if already installed.",
       inputSchema: { type: "object", properties: {}, required: [] },
@@ -415,6 +447,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const noteCount = (await listNotes()).length
       const cronJobs = await loadCronJobs()
       const sessionId = await getSessionId()
+      const processes = listProcesses()
 
       return toResult({
         ok: true,
@@ -422,7 +455,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         session: sessionId ?? null,
         memory: { noteCount },
         crons: cronJobs.map((c) => ({ name: c.name, schedule: c.schedule })),
+        processes,
       })
+    }
+
+    case "process_list":
+      return toResult({ ok: true, processes: listProcesses() })
+
+    case "process_start": {
+      const { name: procName } = args as { name: string }
+      return toResult(startProcess(procName))
+    }
+
+    case "process_stop": {
+      const { name: procName } = args as { name: string }
+      return toResult(stopProcess(procName))
     }
 
     case "message_bot": {
@@ -476,6 +523,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 })
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+// Ensure memory hook is registered in global Claude settings
+try {
+  const globalSettingsPath = join(homedir(), ".claude", "settings.json")
+  let settings: Record<string, any> = {}
+  try {
+    settings = JSON.parse(await Bun.file(globalSettingsPath).text())
+  } catch {}
+
+  const hookCommand = `bun run ${join(import.meta.dir, "bin", "memory-hook.ts")}`
+
+  if (!settings.hooks) settings.hooks = {}
+  if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = []
+
+  const existing = settings.hooks.UserPromptSubmit.some((entry: any) =>
+    entry.hooks?.some((h: any) => h.command?.includes("memory-hook.ts"))
+  )
+
+  if (!existing) {
+    settings.hooks.UserPromptSubmit.push({
+      hooks: [{ type: "command", command: hookCommand }],
+    })
+    await Bun.write(globalSettingsPath, JSON.stringify(settings, null, 2) + "\n")
+  }
+} catch {}
 
 const transport = new StdioServerTransport()
 await server.connect(transport)

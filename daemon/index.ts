@@ -3,6 +3,7 @@ import { join } from "path"
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
 import { startCronScheduler, stopCronScheduler } from "./cron.ts"
+import { startProcesses, stopProcesses } from "./process.ts"
 
 const BOT_DIR = join(homedir(), ".claude-bot")
 const PID_FILE = join(BOT_DIR, "daemon.pid")
@@ -18,6 +19,7 @@ async function ensureDirs(): Promise<void> {
   await mkdir(LOGS_DIR, { recursive: true })
   await mkdir(join(BOT_DIR, "crons"), { recursive: true })
   await mkdir(join(BOT_DIR, "memory"), { recursive: true })
+  await mkdir(join(BOT_DIR, "processes"), { recursive: true })
 }
 
 async function writePid(): Promise<void> {
@@ -30,6 +32,7 @@ async function removePid(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}, shutting down...`)
+  stopProcesses()
   stopCronScheduler()
   await removePid()
   log("Daemon stopped")
@@ -56,6 +59,10 @@ async function main(): Promise<void> {
   // Start cron scheduler
   startCronScheduler()
   log("Cron scheduler started")
+
+  // Start background processes
+  await startProcesses()
+  log("Process manager started")
 
   const sessionId = await getSessionId()
   log(`Daemon ready (session: ${sessionId ?? "pending"})`)

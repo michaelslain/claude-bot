@@ -211,4 +211,25 @@ describe("executeQuery", () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.name).toBe("DeployWorkflow");
   });
+
+  test("OR keyword mode matches notes with any keyword", async () => {
+    const q = parseQuery("alice deploy");
+    q.keywordMode = "or";
+    const results = await executeQuery(q, tempDir);
+    const names = results.map((n) => n.name).sort();
+    expect(names).toContain("Alice");
+    expect(names).toContain("DeployWorkflow");
+  });
+
+  test("OR keyword mode returns empty when no keywords match", async () => {
+    const q = parseQuery("zzzznothing xxxxxnope");
+    q.keywordMode = "or";
+    const results = await executeQuery(q, tempDir);
+    expect(results).toEqual([]);
+  });
+
+  test("AND keyword mode still requires all keywords (default)", async () => {
+    const results = await executeQuery(parseQuery("alice deploy"), tempDir);
+    expect(results).toEqual([]);
+  });
 });

@@ -216,3 +216,4 @@ export async function findBacklinks(
   const notes = await loadAllNotes(dir);
   return notes.filter((n) => n.backlinks.includes(name)).map((n) => n.name);
 }
+
