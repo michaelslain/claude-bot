@@ -19,7 +19,7 @@ Restart Claude Code, then run `/claude-bot:setup` to personalize your bot.
 
 ### Requirements
 
-- [Bun](https://bun.sh) runtime (or npm, pnpm, yarn, etc.)
+- [Bun](https://bun.sh) runtime
 - [Claude Code](https://claude.ai/download) installed and authenticated
 - **macOS:** launchd (automatic)
 - **Linux:** systemd (automatic)
@@ -30,6 +30,8 @@ Restart Claude Code, then run `/claude-bot:setup` to personalize your bot.
 ## Usage
 
 Just talk to Claude naturally, or use the MCP tools (listed below). The bot tools are available in every Claude Code session.
+
+**Quick note:** Tools are available right after you install the plugin. Run `/claude-bot:setup` only if you want scheduled cron jobs and automatic memory consolidation.
 
 ### Examples
 
