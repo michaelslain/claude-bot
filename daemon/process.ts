@@ -2,6 +2,7 @@ import { homedir } from "os"
 import { join } from "path"
 import { readdir, readFile } from "fs/promises"
 import { spawn, type Subprocess } from "bun"
+import { parseFrontmatter } from "../lib/frontmatter"
 
 const PROCESSES_DIR = join(homedir(), ".claude-bot", "processes")
 const LOGS_DIR = join(homedir(), ".claude-bot", "logs")
@@ -23,22 +24,6 @@ export interface ProcessInfo {
   running: boolean
   restart: string
   restarts: number
-}
-
-function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
-  if (!match) return { frontmatter: {}, body: content.trim() }
-
-  const frontmatter: Record<string, string> = {}
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx === -1) continue
-    const key = line.slice(0, colonIdx).trim()
-    const value = line.slice(colonIdx + 1).trim()
-    frontmatter[key] = value
-  }
-
-  return { frontmatter, body: match[2]!.trim() }
 }
 
 function parseArgs(raw: string | undefined): string[] {

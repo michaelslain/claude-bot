@@ -1,10 +1,11 @@
 import { homedir } from "os"
 import { join } from "path"
-import { readdir, readFile, writeFile } from "fs/promises"
+import { readdir, readFile, writeFile, unlink } from "fs/promises"
 import { sendMessage } from "./session"
 import { notify } from "../lib/platform"
+import { parseFrontmatter } from "../lib/frontmatter"
 
-const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
+export const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
 const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
 
 export interface CronExpression {
@@ -80,22 +81,6 @@ export function shouldFire(cron: CronExpression, now: Date): boolean {
     matchesField(cron.month, now.getMonth() + 1) &&
     matchesField(cron.dayOfWeek, now.getDay())
   )
-}
-
-function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
-  if (!match) return { frontmatter: {}, body: content.trim() }
-
-  const frontmatter: Record<string, string> = {}
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const colonIdx = line.indexOf(":")
-    if (colonIdx === -1) continue
-    const key = line.slice(0, colonIdx).trim()
-    const value = line.slice(colonIdx + 1).trim()
-    frontmatter[key] = value
-  }
-
-  return { frontmatter, body: match[2]!.trim() }
 }
 
 export async function loadCronJobs(): Promise<CronJob[]> {
@@ -194,8 +179,7 @@ export function startCronScheduler(): void {
 
   // Run catch-up check immediately on start
   ;(async () => {
-    const jobs = await loadCronJobs()
-    const lastFired = await loadLastFired()
+    const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
     for (const job of jobs) {
       if (job.enabled && shouldCatchUp(job, lastFired) && !runningJobs.has(job.name)) {
         console.log(`[cron] Catch-up firing: ${job.name}`)
@@ -206,8 +190,7 @@ export function startCronScheduler(): void {
 
   cronInterval = setInterval(async () => {
     const now = new Date()
-    const jobs = await loadCronJobs()
-    const lastFired = await loadLastFired()
+    const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
     for (const job of jobs) {
       if (job.enabled && shouldFire(job.cron, now) && !runningJobs.has(job.name)) {
         fireJob(job, lastFired)
@@ -221,4 +204,115 @@ export function stopCronScheduler(): void {
     clearInterval(cronInterval)
     cronInterval = null
   }
+}
+
+// ── Cron CRUD helpers ────────────────────────────────────────────────────────
+
+async function loadCronJob(name: string): Promise<CronJob | null> {
+  const filePath = join(CRONS_DIR, `${name}.md`)
+  try {
+    const content = await readFile(filePath, "utf-8")
+    const { frontmatter, body } = parseFrontmatter(content)
+    const schedule = frontmatter.schedule
+    if (!schedule) return null
+    const cron = parseCronExpression(schedule)
+    if (!cron) return null
+    return {
+      name: frontmatter.name ?? name,
+      schedule,
+      cron,
+      prompt: body,
+      catchup: frontmatter.catchup === "true",
+      enabled: frontmatter.enabled !== "false",
+      notify: frontmatter.notify === "true",
+      model: frontmatter.model,
+      effort: frontmatter.effort,
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function runCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
+  if (runningJobs.has(name)) return { ok: false, error: `Cron job "${name}" is already running` }
+
+  const job = await loadCronJob(name)
+  if (!job) return { ok: false, error: `Cron job "${name}" not found` }
+
+  const lastFired = await loadLastFired()
+  fireJob(job, lastFired)
+  return { ok: true }
+}
+
+function buildCronFile(opts: { name: string; schedule: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean; prompt: string }): string {
+  const lines = ["---"]
+  lines.push(`name: ${opts.name}`)
+  lines.push(`schedule: ${opts.schedule}`)
+  if (opts.model) lines.push(`model: ${opts.model}`)
+  if (opts.effort) lines.push(`effort: ${opts.effort}`)
+  if (opts.catchup) lines.push(`catchup: true`)
+  if (opts.notify) lines.push(`notify: true`)
+  if (opts.enabled === false) lines.push(`enabled: false`)
+  lines.push("---")
+  lines.push("")
+  lines.push(opts.prompt)
+  lines.push("")
+  return lines.join("\n")
+}
+
+export async function createCronJob(opts: { name: string; schedule: string; prompt: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+  const cron = parseCronExpression(opts.schedule)
+  if (!cron) return { ok: false, error: `Invalid cron schedule: "${opts.schedule}"` }
+
+  const filePath = join(CRONS_DIR, `${opts.name}.md`)
+  if (await Bun.file(filePath).exists()) return { ok: false, error: `Cron job "${opts.name}" already exists` }
+
+  await Bun.write(filePath, buildCronFile(opts))
+  return { ok: true }
+}
+
+export async function deleteCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
+  const filePath = join(CRONS_DIR, `${name}.md`)
+  try {
+    await unlink(filePath)
+    return { ok: true }
+  } catch {
+    return { ok: false, error: `Cron job "${name}" not found` }
+  }
+}
+
+export async function updateCronJob(name: string, updates: { enabled?: boolean; schedule?: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; prompt?: string }): Promise<{ ok: boolean; error?: string }> {
+  const filePath = join(CRONS_DIR, `${name}.md`)
+  let content: string
+  try {
+    content = await readFile(filePath, "utf-8")
+  } catch {
+    return { ok: false, error: `Cron job "${name}" not found` }
+  }
+
+  const { frontmatter, body } = parseFrontmatter(content)
+
+  if (updates.schedule !== undefined) {
+    if (!parseCronExpression(updates.schedule)) return { ok: false, error: `Invalid cron schedule: "${updates.schedule}"` }
+    frontmatter.schedule = updates.schedule
+  }
+  if (updates.enabled !== undefined) frontmatter.enabled = String(updates.enabled)
+  if (updates.model !== undefined) frontmatter.model = updates.model
+  if (updates.effort !== undefined) frontmatter.effort = updates.effort
+  if (updates.catchup !== undefined) frontmatter.catchup = String(updates.catchup)
+  if (updates.notify !== undefined) frontmatter.notify = String(updates.notify)
+
+  const newPrompt = updates.prompt ?? body
+
+  await Bun.write(filePath, buildCronFile({
+    name,
+    schedule: frontmatter.schedule!,
+    model: frontmatter.model,
+    effort: frontmatter.effort,
+    catchup: frontmatter.catchup === "true",
+    notify: frontmatter.notify === "true",
+    enabled: frontmatter.enabled !== "false",
+    prompt: newPrompt,
+  }))
+  return { ok: true }
 }

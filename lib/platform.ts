@@ -97,15 +97,14 @@ export function unloadDaemon(configPath: string): void {
   }
 }
 
-export function reloadDaemon(configPath: string, config: string): { ok: boolean; error?: string } {
+export async function reloadDaemon(configPath: string, config: string): Promise<{ ok: boolean; error?: string }> {
+  await Bun.write(configPath, config)
   if (IS_LINUX) {
-    Bun.write(configPath, config)
     spawnSync("systemctl", ["--user", "daemon-reload"])
     const restart = spawnSync("systemctl", ["--user", "restart", SERVICE_NAME])
     if (restart.status !== 0) return { ok: false, error: `restart failed: ${restart.stderr?.toString()}` }
     return { ok: true }
   }
-  Bun.write(configPath, config)
   spawnSync("launchctl", ["unload", configPath])
   const load = spawnSync("launchctl", ["load", configPath])
   if (load.status !== 0) return { ok: false, error: `launchctl load failed: ${load.stderr?.toString()}` }

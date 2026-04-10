@@ -89,6 +89,11 @@ Give me a brief morning summary of what I should focus on today.
 | `remember`     | Save a note to the memory graph               |
 | `recall`       | Search memory with filters                    |
 | `forget`       | Remove a memory note                          |
+| `cron_list`    | List all cron jobs with status and config      |
+| `cron_create`  | Create a new cron job                          |
+| `cron_run`     | Trigger a cron job immediately                 |
+| `cron_update`  | Update a cron job (enable/disable, schedule)   |
+| `cron_delete`  | Delete a cron job                              |
 | `message_bot`  | Send a message to the bot                     |
 | `dream_run`    | Trigger memory consolidation                  |
 | `dream_status` | Get dreaming config                           |

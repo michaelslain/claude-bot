@@ -28,6 +28,11 @@ The session has access to memory MCP tools, full Claude Code capabilities (bash,
 | `remember` | Save a note to the memory graph |
 | `recall` | Search memory (tag:, type:, keyword:, link:, after:, before:) |
 | `forget` | Remove a memory note |
+| `cron_list` | List all cron jobs with status and config |
+| `cron_create` | Create a new cron job |
+| `cron_run` | Trigger a cron job immediately |
+| `cron_update` | Update a cron job (enable/disable, schedule, etc.) |
+| `cron_delete` | Delete a cron job |
 | `message_bot` | Send a message to the persistent bot session |
 | `dream_run` | Trigger memory consolidation |
 | `dream_status` | Get dreaming config |

@@ -5,5 +5,12 @@
   "author": {
     "name": "Michael Slain"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": {
+    "claude-bot": {
+      "command": "bun",
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/server.ts"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    }
+  }
 }

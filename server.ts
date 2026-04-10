@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
-import { loadCronJobs } from "./daemon/cron.ts"
+import { loadCronJobs, runCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
@@ -49,7 +49,7 @@ You are a persistent Claude Code daemon running as a background service. You hav
 
 ## CRITICAL: You MUST use your MCP memory tools
 
-You have MCP tools from the "claude-bot-memory" server. You MUST actively use them:
+You have MCP tools from the "claude-bot" server. You MUST actively use them:
 
 ### remember
 Call this tool to save important information. Do this EVERY time someone tells you something worth keeping.
@@ -165,7 +165,7 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
   if (!(await Bun.file(mcpJsonPath).exists())) {
     await Bun.write(mcpJsonPath, JSON.stringify({
       mcpServers: {
-        "claude-bot-memory": { command: "bun", args: ["run", SERVER_PATH] }
+        "claude-bot": { command: "bun", args: ["run", SERVER_PATH] }
       }
     }, null, 2) + "\n")
   }
@@ -180,21 +180,26 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
     await Bun.write(settingsPath, JSON.stringify({
       permissions: {
         allow: [
-          "mcp__claude-bot-memory__remember",
-          "mcp__claude-bot-memory__recall",
-          "mcp__claude-bot-memory__forget",
-          "mcp__claude-bot-memory__dream_run",
-          "mcp__claude-bot-memory__dream_status",
-          "mcp__claude-bot-memory__dream_config",
-          "mcp__claude-bot-memory__message_bot",
-          "mcp__claude-bot-memory__setup",
-          "mcp__claude-bot-memory__restart",
-          "mcp__claude-bot-memory__stop",
-          "mcp__claude-bot-memory__uninstall",
-          "mcp__claude-bot-memory__status",
-          "mcp__claude-bot-memory__process_list",
-          "mcp__claude-bot-memory__process_start",
-          "mcp__claude-bot-memory__process_stop",
+          "mcp__claude-bot__remember",
+          "mcp__claude-bot__recall",
+          "mcp__claude-bot__forget",
+          "mcp__claude-bot__dream_run",
+          "mcp__claude-bot__dream_status",
+          "mcp__claude-bot__dream_config",
+          "mcp__claude-bot__message_bot",
+          "mcp__claude-bot__setup",
+          "mcp__claude-bot__restart",
+          "mcp__claude-bot__stop",
+          "mcp__claude-bot__uninstall",
+          "mcp__claude-bot__status",
+          "mcp__claude-bot__cron_list",
+          "mcp__claude-bot__cron_create",
+          "mcp__claude-bot__cron_run",
+          "mcp__claude-bot__cron_update",
+          "mcp__claude-bot__cron_delete",
+          "mcp__claude-bot__process_list",
+          "mcp__claude-bot__process_start",
+          "mcp__claude-bot__process_stop",
           "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)"
         ]
       }
@@ -215,7 +220,7 @@ async function restartBot(): Promise<{ ok: boolean; message: string }> {
   }
 
   const config = generateDaemonConfig(daemonOpts())
-  const result = reloadDaemon(DAEMON_PATH, config)
+  const result = await reloadDaemon(DAEMON_PATH, config)
   if (!result.ok) return { ok: false, message: result.error ?? "Failed to restart daemon" }
 
   return { ok: true, message: "Daemon restarted." }
@@ -371,6 +376,69 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "cron_list",
+      description: "List all cron jobs with their schedule, status, and config",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "cron_create",
+      description: "Create a new cron job",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Job name (used as filename, kebab-case)" },
+          schedule: { type: "string", description: "5-field cron expression (e.g. '0 9 * * *' for daily at 9am)" },
+          prompt: { type: "string", description: "The prompt/instructions for the cron job" },
+          model: { type: "string", description: "Model: opus, sonnet, haiku (default: haiku)" },
+          effort: { type: "string", description: "Thinking effort: low, medium, high" },
+          catchup: { type: "boolean", description: "Fire once on wake if missed (default: false)" },
+          notify: { type: "boolean", description: "macOS notification on completion (default: false)" },
+          enabled: { type: "boolean", description: "Enable the job (default: true)" },
+        },
+        required: ["name", "schedule", "prompt"],
+      },
+    },
+    {
+      name: "cron_run",
+      description: "Trigger a cron job immediately, regardless of schedule",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the cron job to run" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "cron_update",
+      description: "Update a cron job's config (enable/disable, change schedule, model, etc.)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the cron job to update" },
+          enabled: { type: "boolean", description: "Enable or disable the job" },
+          schedule: { type: "string", description: "New 5-field cron expression" },
+          model: { type: "string", description: "Model: opus, sonnet, haiku" },
+          effort: { type: "string", description: "Thinking effort: low, medium, high" },
+          catchup: { type: "boolean", description: "Fire once on wake if missed" },
+          notify: { type: "boolean", description: "macOS notification on completion" },
+          prompt: { type: "string", description: "New prompt/instructions" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "cron_delete",
+      description: "Delete a cron job",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the cron job to delete" },
+        },
+        required: ["name"],
+      },
+    },
+    {
       name: "setup",
       description: "First-time install of claude-bot. Creates ~/.claude-bot/ directory, CLAUDE.md, MCP config, crons, and daemon service. Only runs once — fails if already installed.",
       inputSchema: { type: "object", properties: {}, required: [] },
@@ -485,6 +553,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch (err) {
         return toResult({ ok: false, error: String(err) })
       }
+    }
+
+    case "cron_list": {
+      const jobs = await loadCronJobs()
+      return toResult({
+        ok: true,
+        count: jobs.length,
+        crons: jobs.map((j) => ({
+          name: j.name,
+          schedule: j.schedule,
+          enabled: j.enabled,
+          model: j.model ?? "haiku",
+          effort: j.effort,
+          catchup: j.catchup,
+          notify: j.notify,
+          prompt: j.prompt.slice(0, 200) + (j.prompt.length > 200 ? "..." : ""),
+        })),
+      })
+    }
+
+    case "cron_create": {
+      const { name: cronName, schedule, prompt, model, effort, catchup, notify: notifyOpt, enabled } = args as {
+        name: string; schedule: string; prompt: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean
+      }
+      return toResult(await createCronJob({ name: cronName, schedule, prompt, model, effort, catchup, notify: notifyOpt, enabled }))
+    }
+
+    case "cron_run": {
+      const { name: cronName } = args as { name: string }
+      return toResult(await runCronJob(cronName))
+    }
+
+    case "cron_update": {
+      const { name: cronName, ...updates } = args as { name: string; enabled?: boolean; schedule?: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; prompt?: string }
+      return toResult(await updateCronJob(cronName, updates))
+    }
+
+    case "cron_delete": {
+      const { name: cronName } = args as { name: string }
+      return toResult(await deleteCronJob(cronName))
     }
 
     case "setup": {
