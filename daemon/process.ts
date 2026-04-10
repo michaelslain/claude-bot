@@ -1,7 +1,8 @@
 import { homedir } from "os"
 import { join } from "path"
 import { readdir, readFile } from "fs/promises"
-import { spawn, type Subprocess } from "bun"
+import { spawn as nodeSpawn, type ChildProcess } from "child_process"
+import { openSync, closeSync } from "fs"
 import { parseFrontmatter } from "../lib/frontmatter"
 
 const PROCESSES_DIR = join(homedir(), ".claude-bot", "processes")
@@ -81,7 +82,7 @@ export async function loadProcessDefs(): Promise<ProcessDef[]> {
 
 interface ManagedProcess {
   def: ProcessDef
-  proc: Subprocess | null
+  proc: ChildProcess | null
   restarts: number
   lastStart: number
   backoff: number
@@ -90,34 +91,48 @@ interface ManagedProcess {
 
 const managed = new Map<string, ManagedProcess>()
 
+function killProcessGroup(mp: ManagedProcess): void {
+  if (mp.proc?.pid) {
+    // Negative PID kills the entire process group (detached: true gives each child its own)
+    try { process.kill(-mp.proc.pid, "SIGTERM") } catch {}
+  }
+  mp.proc = null
+}
+
 function spawnProcess(mp: ManagedProcess): void {
   const { def } = mp
   const stdoutPath = join(LOGS_DIR, `${def.name}.stdout.log`)
   const stderrPath = join(LOGS_DIR, `${def.name}.stderr.log`)
 
-  const stdout = Bun.file(stdoutPath)
-  const stderr = Bun.file(stderrPath)
+  const stdoutFd = openSync(stdoutPath, "a")
+  const stderrFd = openSync(stderrPath, "a")
 
-  mp.proc = spawn({
-    cmd: [def.command, ...def.args],
+  mp.proc = nodeSpawn(def.command, def.args, {
     cwd: def.cwd,
     env: { ...process.env, ...def.env },
-    stdout,
-    stderr,
+    stdio: ["ignore", stdoutFd, stderrFd],
+    detached: true,
   })
 
+  // Parent's copies of the fds — child inherited its own via spawn
+  closeSync(stdoutFd)
+  closeSync(stderrFd)
+
+  mp.proc.unref()
   mp.lastStart = Date.now()
   console.log(`[process] Started "${def.name}" (PID ${mp.proc.pid})`)
 
   // Watch for exit
-  mp.proc.exited.then((code) => {
+  child.on("exit", (code, signal) => {
     if (mp.stopping) return
-    console.log(`[process] "${def.name}" exited with code ${code}`)
+    const exitInfo = signal ? `signal ${signal}` : `code ${code}`
+    console.log(`[process] "${def.name}" exited with ${exitInfo}`)
     mp.proc = null
 
+    const exitCode = signal ? 1 : (code ?? 0)
     const shouldRestart =
       def.restart === "always" ||
-      (def.restart === "on-failure" && code !== 0)
+      (def.restart === "on-failure" && exitCode !== 0)
 
     if (!shouldRestart) return
 
@@ -160,10 +175,7 @@ export async function startProcesses(): Promise<void> {
 export function stopProcesses(): void {
   for (const [, mp] of managed) {
     mp.stopping = true
-    if (mp.proc) {
-      mp.proc.kill()
-      mp.proc = null
-    }
+    killProcessGroup(mp)
   }
   managed.clear()
 }
@@ -185,8 +197,7 @@ export function stopProcess(name: string): { ok: boolean; error?: string } {
   if (!mp.proc) return { ok: false, error: `"${name}" is not running` }
 
   mp.stopping = true
-  mp.proc.kill()
-  mp.proc = null
+  killProcessGroup(mp)
   return { ok: true }
 }
 
