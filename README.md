@@ -1,8 +1,7 @@
 # claude-bot
 
-> Claude Code plugin that turns Claude into your personal assistant
-
-Long-term memory, scheduled tasks, and a background daemon. Not just for coding — ask it about your week, your deadlines, your notes. It knows you.
+Claude Code plugin that turns Claude into a personal assistant.
+Long-term graph memory, scheduled tasks, and a background daemon.
 
 ---
 
@@ -20,17 +19,19 @@ Restart Claude Code, then run `/claude-bot:setup` to personalize your bot.
 
 ### Requirements
 
-- [Bun](https://bun.sh) runtime
-- [Claude CLI](https://claude.ai/download) installed and authenticated
+- [Bun](https://bun.sh) runtime (or npm, pnpm, yarn, etc.)
+- [Claude Code](https://claude.ai/download) installed and authenticated
 - **macOS:** launchd (automatic)
 - **Linux:** systemd (automatic)
-- **Windows:** Not yet supported
+- **Windows:** _Not yet supported_
 
 ---
 
 ## Usage
 
-Just talk to Claude naturally. The bot tools are available in every Claude Code session.
+Just talk to Claude naturally, or use the MCP tools (listed below). The bot tools are available in every Claude Code session.
+
+### Examples
 
 > "Ask the bot what tasks are due this week"
 >
@@ -50,11 +51,35 @@ Just talk to Claude naturally. The bot tools are available in every Claude Code 
 
 The default model is `haiku`. You can ask for `opus` or `sonnet` when you need more depth.
 
+### MCP Tools
+
+| Tool           | Description                                   |
+| -------------- | --------------------------------------------- |
+| `remember`     | Save a note to the memory graph               |
+| `recall`       | Search memory with filters                    |
+| `forget`       | Remove a memory note                          |
+| `cron_list`    | List all cron jobs with status and config     |
+| `cron_create`  | Create a new cron job                         |
+| `cron_run`     | Trigger a cron job immediately                |
+| `cron_update`  | Update a cron job (enable/disable, schedule)  |
+| `cron_delete`  | Delete a cron job                             |
+| `message_bot`  | Send a message to the bot                     |
+| `dream_run`    | Trigger memory consolidation                  |
+| `dream_status` | Get dreaming config                           |
+| `dream_config` | Update dreaming interval/enabled              |
+| `status`       | Bot status, session ID, note count, cron jobs |
+| `setup`        | First-time install via launchd                |
+| `restart`      | Restart the bot                               |
+| `stop`         | Stop the bot                                  |
+| `uninstall`    | Remove the bot (preserves memory)             |
+
 ---
 
 ## Cron Jobs
 
 Persistent file-based crons at `~/.claude-bot/crons/*.md`. They survive daemon restarts because they're just files on disk.
+
+### Example
 
 ```markdown
 ---
@@ -70,6 +95,8 @@ Check memory for my current projects, upcoming deadlines, and open tasks.
 Give me a brief morning summary of what I should focus on today.
 ```
 
+### Parameters
+
 | Frontmatter | Default  | Description                                |
 | ----------- | -------- | ------------------------------------------ |
 | `name`      | filename | Job name                                   |
@@ -82,33 +109,11 @@ Give me a brief morning summary of what I should focus on today.
 
 ---
 
-## MCP Tools
-
-| Tool           | Description                                   |
-| -------------- | --------------------------------------------- |
-| `remember`     | Save a note to the memory graph               |
-| `recall`       | Search memory with filters                    |
-| `forget`       | Remove a memory note                          |
-| `cron_list`    | List all cron jobs with status and config      |
-| `cron_create`  | Create a new cron job                          |
-| `cron_run`     | Trigger a cron job immediately                 |
-| `cron_update`  | Update a cron job (enable/disable, schedule)   |
-| `cron_delete`  | Delete a cron job                              |
-| `message_bot`  | Send a message to the bot                     |
-| `dream_run`    | Trigger memory consolidation                  |
-| `dream_status` | Get dreaming config                           |
-| `dream_config` | Update dreaming interval/enabled              |
-| `status`       | Bot status, session ID, note count, cron jobs |
-| `setup`        | First-time install via launchd                |
-| `restart`      | Restart the bot                               |
-| `stop`         | Stop the bot                                  |
-| `uninstall`    | Remove the bot (preserves memory)             |
-
----
-
 ## Memory Graph
 
 Notes are markdown files with YAML frontmatter and `[[backlinks]]`:
+
+### Example
 
 ```markdown
 ---
@@ -118,14 +123,18 @@ created: 2026-04-08
 updated: 2026-04-08
 ---
 
-Alice is the tech lead on [[project-atlas]]. Prefers async communication.
+I like chicken.
 ```
 
-**Note types:** `person` `project` `workflow` `fact` `preference` `daily` `auto`
+### Note Types
+
+`person` `project` `workflow` `fact` `preference` `daily` `auto`
 
 `auto` notes are created by the automatic prompt collector — raw conversation snippets that dreaming processes and consolidates into typed notes.
 
-**Dreaming** consolidates memory automatically — merging duplicates, improving notes, extracting value from `auto` notes, removing stale entries. Runs hourly via cron or manually via `dream_run`.
+### Dreaming
+
+Consolidates memory automatically — merging duplicates, improving notes, extracting value from `auto` notes, removing stale entries. Runs hourly via cron or manually via `dream_run`.
 
 ---
 
@@ -158,7 +167,7 @@ claude-bot/
 
 ---
 
-## Development
+## Dev
 
 ```bash
 git clone https://github.com/michaelslain/claude-bot.git
