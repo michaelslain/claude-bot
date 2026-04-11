@@ -128,7 +128,7 @@ const jobAbortControllers = new Map<string, AbortController>()
 
 export interface LastFiredEntry {
   timestamp: string
-  result: "success" | "failed" | "killed"
+  result: "success" | "failed" | "unknown" | "killed"
 }
 
 export async function loadLastFired(): Promise<Record<string, LastFiredEntry>> {
@@ -208,17 +208,31 @@ function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   return elapsed > interval * 1.5
 }
 
+const CRON_RESULT_INSTRUCTION = `\n\nIMPORTANT: When you are done, print exactly [CRON_RESULT:SUCCESS] if the task completed successfully, or [CRON_RESULT:FAILURE] if it failed. This must be the last thing you print.`
+
+function parseCronResult(output: string): "success" | "failed" | "unknown" {
+  // Search from the end for the last marker
+  const successIdx = output.lastIndexOf("[CRON_RESULT:SUCCESS]")
+  const failureIdx = output.lastIndexOf("[CRON_RESULT:FAILURE]")
+  if (successIdx === -1 && failureIdx === -1) return "unknown"
+  if (successIdx > failureIdx) return "success"
+  return "failed"
+}
+
 async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>): Promise<void> {
   const ac = new AbortController()
   runningJobs.add(job.name)
   jobAbortControllers.set(job.name, ac)
   await markRunning(job.name)
   try {
-    const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`, { model: job.model, effort: job.effort, abortController: ac })
-    lastFired[job.name] = { timestamp: new Date().toISOString(), result: "success" }
+    const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}`
+    const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac })
+    const result = parseCronResult(response.result)
+    lastFired[job.name] = { timestamp: new Date().toISOString(), result }
     await saveLastFired(lastFired)
     if (job.notify) {
-      notify(`claude-bot: ${job.name}`, response.result || "Cron job completed.")
+      const status = result === "success" ? "completed" : result === "failed" ? "failed" : "completed (unknown result)"
+      notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
     }
   } catch (err) {
     // Don't overwrite "killed" result if this was an abort
