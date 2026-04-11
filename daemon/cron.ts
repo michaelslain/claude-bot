@@ -1,12 +1,13 @@
 import { homedir } from "os"
 import { join } from "path"
-import { readdir, readFile, writeFile, unlink } from "fs/promises"
+import { readdir, readFile, writeFile, unlink, rename } from "fs/promises"
 import { sendMessage } from "./session"
 import { notify } from "../lib/platform"
 import { parseFrontmatter } from "../lib/frontmatter"
 
 export const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
 const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
+const RUNNING_FILE = join(CRONS_DIR, ".running.json")
 
 export interface CronExpression {
   minute: string
@@ -123,10 +124,11 @@ export async function loadCronJobs(): Promise<CronJob[]> {
 
 let cronInterval: ReturnType<typeof setInterval> | null = null
 const runningJobs = new Set<string>()
+const jobAbortControllers = new Map<string, AbortController>()
 
 export interface LastFiredEntry {
   timestamp: string
-  result: "success" | "failed"
+  result: "success" | "failed" | "killed"
 }
 
 export async function loadLastFired(): Promise<Record<string, LastFiredEntry>> {
@@ -152,6 +154,42 @@ async function saveLastFired(data: Record<string, LastFiredEntry>): Promise<void
   await writeFile(LAST_FIRED_FILE, JSON.stringify(data, null, 2), "utf-8")
 }
 
+// ── Running crons tracking ──────────────────────────────────────────────────
+
+export interface RunningEntry {
+  startedAt: string
+}
+
+export async function loadRunning(): Promise<Record<string, RunningEntry>> {
+  try {
+    const raw = await readFile(RUNNING_FILE, "utf-8")
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+async function saveRunning(data: Record<string, RunningEntry>): Promise<void> {
+  // Atomic write: temp file + rename to avoid partial reads
+  const tmp = RUNNING_FILE + ".tmp"
+  await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8")
+  await rename(tmp, RUNNING_FILE)
+}
+
+async function markRunning(name: string): Promise<void> {
+  console.log(`[cron] markRunning: ${name}`)
+  const data = await loadRunning()
+  data[name] = { startedAt: new Date().toISOString() }
+  await saveRunning(data)
+}
+
+async function markDone(name: string): Promise<void> {
+  console.log(`[cron] markDone: ${name}`)
+  const data = await loadRunning()
+  delete data[name]
+  await saveRunning(data)
+}
+
 function getIntervalMs(cron: CronExpression): number {
   // Estimate the interval from the cron expression for catch-up decisions
   if (cron.minute.startsWith("*/")) return parseInt(cron.minute.slice(2), 10) * 60_000
@@ -171,15 +209,20 @@ function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>):
 }
 
 async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>): Promise<void> {
+  const ac = new AbortController()
   runningJobs.add(job.name)
+  jobAbortControllers.set(job.name, ac)
+  await markRunning(job.name)
   try {
-    const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`, { model: job.model, effort: job.effort })
+    const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`, { model: job.model, effort: job.effort, abortController: ac })
     lastFired[job.name] = { timestamp: new Date().toISOString(), result: "success" }
     await saveLastFired(lastFired)
     if (job.notify) {
       notify(`claude-bot: ${job.name}`, response.result || "Cron job completed.")
     }
   } catch (err) {
+    // Don't overwrite "killed" result if this was an abort
+    if (ac.signal.aborted) return
     console.error(`[cron] Failed to fire job "${job.name}":`, err)
     lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
     await saveLastFired(lastFired)
@@ -187,7 +230,30 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
     }
   } finally {
+    jobAbortControllers.delete(job.name)
+    await markDone(job.name)
     runningJobs.delete(job.name)
+  }
+}
+
+export async function recoverInterruptedCrons(): Promise<void> {
+  const running = await loadRunning()
+  const names = Object.keys(running)
+  if (names.length === 0) return
+
+  console.log(`[cron] Recovering interrupted crons: ${names.join(", ")}`)
+  const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
+  const jobMap = new Map(jobs.map((j) => [j.name, j]))
+
+  for (const name of names) {
+    const job = jobMap.get(name)
+    if (job && job.enabled && !runningJobs.has(name)) {
+      console.log(`[cron] Re-firing interrupted cron: ${name}`)
+      fireJob(job, lastFired)
+    } else {
+      // Job no longer exists or is disabled — clean up stale entry
+      await markDone(name)
+    }
   }
 }
 
@@ -251,13 +317,31 @@ async function loadCronJob(name: string): Promise<CronJob | null> {
 }
 
 export async function runCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
-  if (runningJobs.has(name)) return { ok: false, error: `Cron job "${name}" is already running` }
+  if (runningJobs.has(name)) return { ok: false, error: `Cron job "${name}" is already running. Call cron_stop first to kill it.` }
 
   const job = await loadCronJob(name)
   if (!job) return { ok: false, error: `Cron job "${name}" not found` }
 
   const lastFired = await loadLastFired()
   fireJob(job, lastFired)
+  return { ok: true }
+}
+
+export async function stopCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
+  const ac = jobAbortControllers.get(name)
+  if (!ac) return { ok: false, error: `Cron job "${name}" is not running` }
+
+  ac.abort()
+
+  // Record as killed
+  const lastFired = await loadLastFired()
+  lastFired[name] = { timestamp: new Date().toISOString(), result: "killed" }
+  await saveLastFired(lastFired)
+
+  // Clean up running state (fireJob's finally block will also run, but we do it eagerly)
+  await markDone(name)
+
+  console.log(`[cron] Stopped running job "${name}"`)
   return { ok: true }
 }
 

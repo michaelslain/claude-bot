@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
-import { loadCronJobs, loadLastFired, runCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
+import { loadCronJobs, loadLastFired, loadRunning, runCronJob, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
@@ -195,6 +195,7 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
           "mcp__claude-bot__cron_list",
           "mcp__claude-bot__cron_create",
           "mcp__claude-bot__cron_run",
+          "mcp__claude-bot__cron_stop",
           "mcp__claude-bot__cron_update",
           "mcp__claude-bot__cron_delete",
           "mcp__claude-bot__process_list",
@@ -410,6 +411,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "cron_stop",
+      description: "Stop a currently running cron job session. Use before cron_run to restart a stuck job.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the cron job to stop" },
+        },
+        required: ["name"],
+      },
+    },
+    {
       name: "cron_update",
       description: "Update a cron job's config (enable/disable, change schedule, model, etc.)",
       inputSchema: {
@@ -519,6 +531,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const sessionId = await getSessionId()
       const processes = listProcesses()
       const lastFired = await loadLastFired()
+      const running = await loadRunning()
 
       return toResult({
         ok: true,
@@ -527,11 +540,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         memory: { noteCount },
         crons: cronJobs.map((c) => {
           const entry = lastFired[c.name]
+          const runEntry = running[c.name]
           return {
             name: c.name,
             schedule: c.schedule,
             lastRun: entry?.timestamp ?? null,
             lastResult: entry?.result ?? null,
+            running: runEntry ? true : false,
+            runningSince: runEntry?.startedAt ?? null,
           }
         }),
         processes,
@@ -598,6 +614,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "cron_run": {
       const { name: cronName } = args as { name: string }
       return toResult(await runCronJob(cronName))
+    }
+
+    case "cron_stop": {
+      const { name: cronName } = args as { name: string }
+      return toResult(await stopCronJob(cronName))
     }
 
     case "cron_update": {

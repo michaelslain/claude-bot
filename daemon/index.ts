@@ -2,7 +2,7 @@ import { homedir } from "os"
 import { join } from "path"
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
-import { startCronScheduler, stopCronScheduler } from "./cron.ts"
+import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons } from "./cron.ts"
 import { startProcesses, stopProcesses } from "./process.ts"
 
 const BOT_DIR = join(homedir(), ".claude-bot")
@@ -44,7 +44,16 @@ async function main(): Promise<void> {
   await writePid()
   log(`Daemon starting (PID ${process.pid})`)
 
-  // Initialize bot session
+  // Start background processes immediately — they're standalone scripts,
+  // independent of the bot session
+  await startProcesses()
+  log("Process manager started")
+
+  // Start cron scheduler (tick loop only — crons wait for session on fire)
+  startCronScheduler()
+  log("Cron scheduler started")
+
+  // Initialize bot session (can take 30+ seconds)
   log("Initializing bot session...")
   try {
     const response = await sendMessage(
@@ -56,13 +65,8 @@ async function main(): Promise<void> {
     log("Continuing anyway — session will be created on first message")
   }
 
-  // Start cron scheduler
-  startCronScheduler()
-  log("Cron scheduler started")
-
-  // Start background processes
-  await startProcesses()
-  log("Process manager started")
+  // Recover crons that were interrupted by the previous shutdown
+  await recoverInterruptedCrons()
 
   const sessionId = await getSessionId()
   log(`Daemon ready (session: ${sessionId ?? "pending"})`)

@@ -36,6 +36,7 @@ export interface BotResponse {
 export interface SendOptions {
   model?: string
   effort?: string
+  abortController?: AbortController
 }
 
 export async function sendMessage(message: string, opts?: SendOptions): Promise<BotResponse> {
@@ -50,6 +51,10 @@ export async function sendMessage(message: string, opts?: SendOptions): Promise<
 
   if (opts?.effort) {
     options.thinkingBudget = opts.effort === "high" ? "high" : opts.effort === "low" ? "low" : "medium"
+  }
+
+  if (opts?.abortController) {
+    options.abortController = opts.abortController
   }
 
   if (existingSessionId) {
