@@ -2,7 +2,7 @@ import { homedir } from "os"
 import { join } from "path"
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
-import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons } from "./cron.ts"
+import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons, waitForRunningJobs } from "./cron.ts"
 import { startProcesses, stopProcesses } from "./process.ts"
 
 const BOT_DIR = join(homedir(), ".claude-bot")
@@ -32,8 +32,9 @@ async function removePid(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}, shutting down...`)
-  stopProcesses()
   stopCronScheduler()
+  await waitForRunningJobs(10_000)
+  stopProcesses()
   await removePid()
   log("Daemon stopped")
   process.exit(0)

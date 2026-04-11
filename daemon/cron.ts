@@ -83,9 +83,10 @@ function matchesField(field: string, value: number): boolean {
     return value % step === 0
   }
 
-  // Range: 1-5
+  // Range: 1-5 (reject malformed like 1-2-3)
   if (field.includes("-") && !field.includes(",")) {
     const parts = field.split("-")
+    if (parts.length !== 2) return false
     const start = Number(parts[0])
     const end = Number(parts[1])
     if (isNaN(start) || isNaN(end)) return false
@@ -95,7 +96,7 @@ function matchesField(field: string, value: number): boolean {
   // List: 1,5,10
   if (field.includes(",")) {
     return field.split(",").some((part) => {
-      const num = parseInt(part, 10)
+      const num = parseInt(part.trim(), 10)
       return !isNaN(num) && num === value
     })
   }
@@ -169,7 +170,9 @@ export async function loadLastFired(): Promise<Record<string, LastFiredEntry>> {
 }
 
 async function saveLastFired(data: Record<string, LastFiredEntry>): Promise<void> {
-  await writeFile(LAST_FIRED_FILE, JSON.stringify(data, null, 2), "utf-8")
+  const tmp = LAST_FIRED_FILE + ".tmp"
+  await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8")
+  await rename(tmp, LAST_FIRED_FILE)
 }
 
 // ── Running crons tracking ──────────────────────────────────────────────────
@@ -212,8 +215,21 @@ function getIntervalMs(cron: CronExpression): number {
   // Estimate the interval from the cron expression for catch-up decisions
   if (cron.minute.startsWith("*/")) return parseInt(cron.minute.slice(2), 10) * 60_000
   if (cron.hour.startsWith("*/")) return parseInt(cron.hour.slice(2), 10) * 3600_000
-  if (cron.hour !== "*" && cron.dayOfMonth === "*") return 24 * 3600_000 // daily
-  return 24 * 3600_000 // default: assume daily
+
+  // Weekly: specific day-of-week with wildcard day-of-month
+  if (cron.dayOfWeek !== "*" && cron.dayOfMonth === "*") return 7 * 24 * 3600_000
+
+  // Monthly: specific day-of-month
+  if (cron.dayOfMonth !== "*") return 30 * 24 * 3600_000
+
+  // Daily: specific hour with wildcard days
+  if (cron.hour !== "*") return 24 * 3600_000
+
+  // Hourly: specific minute with wildcard hour
+  if (cron.minute !== "*") return 3600_000
+
+  // Default: assume every minute
+  return 60_000
 }
 
 function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>): boolean {
@@ -353,8 +369,14 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
         notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
       }
     } catch (err) {
-      // Don't overwrite "killed" result if this was an abort
-      if (ac.signal.aborted) return
+      if (ac.signal.aborted) {
+        // Record as killed if stopCronJob hasn't already
+        if (!lastFired[job.name] || lastFired[job.name].result !== "killed") {
+          lastFired[job.name] = { timestamp: new Date().toISOString(), result: "killed" }
+          await saveLastFired(lastFired)
+        }
+        return
+      }
       console.error(`[cron] Failed to fire job "${job.name}":`, err)
       lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
       await saveLastFired(lastFired)
@@ -435,6 +457,28 @@ export function stopCronScheduler(): void {
   if (triggerInterval !== null) {
     clearInterval(triggerInterval)
     triggerInterval = null
+  }
+}
+
+/**
+ * Returns a promise that resolves when all currently running cron jobs finish.
+ * Used during graceful shutdown. Resolves after a timeout to prevent hanging.
+ */
+export async function waitForRunningJobs(timeoutMs: number = 10_000): Promise<void> {
+  if (runningJobs.size === 0) return
+
+  console.log(`[cron] Waiting for ${runningJobs.size} running job(s) to finish (timeout: ${timeoutMs}ms)...`)
+
+  const start = Date.now()
+  while (runningJobs.size > 0 && Date.now() - start < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+
+  if (runningJobs.size > 0) {
+    console.warn(`[cron] Shutdown timeout — ${runningJobs.size} job(s) still running, aborting`)
+    for (const [, ac] of jobAbortControllers) {
+      ac.abort()
+    }
   }
 }
 

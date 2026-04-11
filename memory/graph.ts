@@ -57,7 +57,7 @@ function extractBacklinks(content: string): string[] {
   const matches = content.matchAll(/\[\[([^\]]+)\]\]/g);
   const backlinks: string[] = [];
   for (const match of matches) {
-    const linked = match[1];
+    const linked = match[1]?.trim();
     if (linked) backlinks.push(linked);
   }
   return [...new Set(backlinks)];

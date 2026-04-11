@@ -8,7 +8,7 @@ import {
 import { sendMessage, getSessionId } from "./daemon/session.ts"
 import { loadCronJobs, loadLastFired, loadRunning, requestCronRun, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
-import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
+import { writeNote, deleteNote, listNotes, readNote } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
@@ -128,8 +128,14 @@ async function getDaemonPid(): Promise<number | null> {
 }
 
 function daemonOpts() {
+  const bunPath = Bun.which("bun") ?? (process.platform === "darwin" ? "/opt/homebrew/bin/bun" : join(homedir(), ".bun", "bin", "bun"))
+
+  if (!bunPath) {
+    throw new Error("Could not find bun binary. Install bun first: https://bun.sh")
+  }
+
   return {
-    bunPath: Bun.which("bun") ?? (process.platform === "darwin" ? "/opt/homebrew/bin/bun" : join(homedir(), ".bun", "bin", "bun")),
+    bunPath,
     daemonEntry: join(import.meta.dir, "daemon", "index.ts"),
     logsDir: join(BOT_DIR, "logs"),
     workDir: BOT_DIR,
@@ -495,12 +501,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: string
       }
       const date = today()
+      const existing = await readNote(noteName)
       await writeNote(
         noteName,
         {
-          type: (type as NoteType) ?? "fact",
-          tags: tags ?? [],
-          created: date,
+          type: (type as NoteType) ?? existing?.frontmatter.type ?? "fact",
+          tags: tags ?? existing?.frontmatter.tags ?? [],
+          created: existing?.frontmatter.created ?? date,
           updated: date,
         },
         content
@@ -530,6 +537,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "dream_config": {
       const config = args as Partial<{ enabled: boolean; intervalMs: number }>
+      if (config.intervalMs !== undefined && config.intervalMs <= 0) {
+        return toResult({ ok: false, error: "intervalMs must be positive" })
+      }
       updateDreamConfig(config)
       return toResult({ ok: true, ...getDreamConfig() })
     }
@@ -582,6 +592,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return toResult({ ok: false, error: "claude-bot is not set up yet. Run /claude-bot:setup or call the setup tool first." })
       }
       const { message, model, effort } = args as { message: string; model?: string; effort?: string }
+      const validModels = ["opus", "sonnet", "haiku"]
+      if (model && !validModels.includes(model)) {
+        return toResult({ ok: false, error: `Invalid model "${model}". Must be one of: ${validModels.join(", ")}` })
+      }
       try {
         const response = await sendMessage(message, { model, effort })
         return toResult({ ok: true, response: response.result, sessionId: response.sessionId })

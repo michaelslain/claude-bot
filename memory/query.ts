@@ -53,7 +53,7 @@ export function parseQuery(queryString: string): ParsedQuery {
         result.types.push(value.toLowerCase());
         break;
       case "link":
-        result.links.push(value);
+        result.links.push(value.toLowerCase());
         break;
       case "after":
         result.after = value;
@@ -92,8 +92,9 @@ function noteMatchesQuery(note: MemoryNote, query: ParsedQuery): boolean {
 
   // Link filter — note must link to ALL requested note names
   if (query.links.length > 0) {
+    const lowerBacklinks = new Set(backlinks.map((b) => b.toLowerCase()));
     for (const linkTarget of query.links) {
-      if (!backlinks.includes(linkTarget)) return false;
+      if (!lowerBacklinks.has(linkTarget)) return false;
     }
   }
 

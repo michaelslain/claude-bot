@@ -1,4 +1,4 @@
-import { loadAllNotes, writeNote, deleteNote, getMemoryDir } from "./graph.ts"
+import { loadAllNotes, readNote, writeNote, deleteNote, getMemoryDir } from "./graph.ts"
 import type { NoteType } from "./graph.ts"
 import { sendMessage } from "../daemon/session.ts"
 import { parseJsonResponse } from "../lib/json.ts"
@@ -121,7 +121,8 @@ export async function dream(
     let response: string
     try {
       response = await dispatch(CONSOLIDATION_PROMPT + `\n\nToday's date: ${today()}\n\n` + notesJson)
-    } catch {
+    } catch (err) {
+      console.error(`[dream] Failed to dispatch batch ${i / BATCH_SIZE + 1}:`, err)
       continue
     }
 
@@ -132,12 +133,23 @@ export async function dream(
 
     for (const merge of result.merge) {
       if (!merge.keep || !merge.updatedContent) continue
-      for (const name of merge.delete ?? []) {
-        if (name && name !== merge.keep) {
-          await deleteNote(name, dir)
-          totalMerged++
-        }
+
+      // Collect names to delete, skipping the keep target
+      const toDelete = (merge.delete ?? []).filter((name) => name && name !== merge.keep)
+
+      // Guard: skip this merge if any delete target was already deleted by a prior merge
+      const allExist = await Promise.all(
+        toDelete.map(async (name) => {
+          const note = await readNote(name, dir)
+          return note !== null
+        })
+      )
+      if (allExist.some((exists) => !exists)) continue
+
+      for (const name of toDelete) {
+        await deleteNote(name, dir)
       }
+
       const existing = batch.find((n) => n.name === merge.keep)
       await writeNote(
         merge.keep,
@@ -150,6 +162,7 @@ export async function dream(
         merge.updatedContent,
         dir
       )
+      totalMerged++
     }
 
     for (const imp of result.improve) {
