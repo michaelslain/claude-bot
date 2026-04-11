@@ -9,11 +9,29 @@ try {
 
   // --- Junk filter ---
 
-  // Too short to be meaningful
-  if (prompt.length < 30) process.exit(0)
+  // Too short to contain meaningful knowledge
+  if (prompt.length < 100) process.exit(0)
 
   // Slash commands
   if (prompt.startsWith("/")) process.exit(0)
+
+  // Cron prompts — already stored in cron files
+  if (prompt.startsWith("[Cron:")) process.exit(0)
+
+  // Task notifications — system plumbing
+  if (prompt.includes("<task-notification>")) process.exit(0)
+
+  // Daemon startup prompt
+  if (prompt.includes("You are now running as a background daemon")) process.exit(0)
+
+  // System/hook XML blocks
+  if (prompt.includes("<system-reminder>")) process.exit(0)
+
+  // Questions and short commands — not declarative knowledge
+  // (ends with ? and is under 300 chars, or is clearly imperative)
+  const trimmed = prompt.trim()
+  if (trimmed.length < 300 && trimmed.endsWith("?")) process.exit(0)
+  if (trimmed.length < 200 && /^(can you|could you|please|just|ok |u can|how about|try |run |kill |restart |stop |check |give |wait )/i.test(trimmed)) process.exit(0)
 
   // Mostly code — check for indentation and code markers
   const lines = prompt.split("\n")
