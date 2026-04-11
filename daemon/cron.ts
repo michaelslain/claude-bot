@@ -219,35 +219,48 @@ function parseCronResult(output: string): "success" | "failed" | "unknown" {
   return "failed"
 }
 
+/**
+ * Start a cron job: marks it as running (in-memory + on-disk) synchronously,
+ * then runs the session in the background. Callers should await this to ensure
+ * .running.json is written before proceeding.
+ */
 async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>): Promise<void> {
   const ac = new AbortController()
   runningJobs.add(job.name)
   jobAbortControllers.set(job.name, ac)
+  // Write .running.json BEFORE starting the session — callers await this
   await markRunning(job.name)
-  try {
-    const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}`
-    const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac })
-    const result = parseCronResult(response.result)
-    lastFired[job.name] = { timestamp: new Date().toISOString(), result }
-    await saveLastFired(lastFired)
-    if (job.notify) {
-      const status = result === "success" ? "completed" : result === "failed" ? "failed" : "completed (unknown result)"
-      notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
+
+  // Run the actual session in the background (not awaited by caller)
+  const sessionPromise = (async () => {
+    try {
+      const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}`
+      const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac })
+      const result = parseCronResult(response.result)
+      lastFired[job.name] = { timestamp: new Date().toISOString(), result }
+      await saveLastFired(lastFired)
+      if (job.notify) {
+        const status = result === "success" ? "completed" : result === "failed" ? "failed" : "completed (unknown result)"
+        notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
+      }
+    } catch (err) {
+      // Don't overwrite "killed" result if this was an abort
+      if (ac.signal.aborted) return
+      console.error(`[cron] Failed to fire job "${job.name}":`, err)
+      lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
+      await saveLastFired(lastFired)
+      if (job.notify) {
+        notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
+      }
+    } finally {
+      jobAbortControllers.delete(job.name)
+      await markDone(job.name)
+      runningJobs.delete(job.name)
     }
-  } catch (err) {
-    // Don't overwrite "killed" result if this was an abort
-    if (ac.signal.aborted) return
-    console.error(`[cron] Failed to fire job "${job.name}":`, err)
-    lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
-    await saveLastFired(lastFired)
-    if (job.notify) {
-      notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
-    }
-  } finally {
-    jobAbortControllers.delete(job.name)
-    await markDone(job.name)
-    runningJobs.delete(job.name)
-  }
+  })()
+
+  // Catch unhandled rejections from the background session
+  sessionPromise.catch((err) => console.error(`[cron] Unhandled error in "${job.name}":`, err))
 }
 
 export async function recoverInterruptedCrons(): Promise<void> {
@@ -263,7 +276,8 @@ export async function recoverInterruptedCrons(): Promise<void> {
     const job = jobMap.get(name)
     if (job && job.enabled && !runningJobs.has(name)) {
       console.log(`[cron] Re-firing interrupted cron: ${name}`)
-      fireJob(job, lastFired)
+      // Await fireJob to ensure .running.json + in-memory state are set before continuing
+      await fireJob(job, lastFired)
     } else {
       // Job no longer exists or is disabled — clean up stale entry
       await markDone(name)
@@ -280,7 +294,7 @@ export function startCronScheduler(): void {
     for (const job of jobs) {
       if (job.enabled && shouldCatchUp(job, lastFired) && !runningJobs.has(job.name)) {
         console.log(`[cron] Catch-up firing: ${job.name}`)
-        await fireJob(job, lastFired)
+        await fireJob(job, lastFired) // await ensures .running.json is written before next iteration
       }
     }
   })()
@@ -337,7 +351,7 @@ export async function runCronJob(name: string): Promise<{ ok: boolean; error?: s
   if (!job) return { ok: false, error: `Cron job "${name}" not found` }
 
   const lastFired = await loadLastFired()
-  fireJob(job, lastFired)
+  await fireJob(job, lastFired) // await ensures .running.json is written before returning
   return { ok: true }
 }
 
