@@ -92,6 +92,7 @@ Standard 5-field cron expressions. The daemon checks every 60 seconds and fires 
 | `schedule` | required | 5-field cron expression |
 | `model` | `haiku` | Model: `opus`, `sonnet`, `haiku` |
 | `effort` | | Thinking effort: `low`, `medium`, `high` |
+| `timeout` | `300` | Session timeout in seconds |
 | `catchup` | `false` | Fire once on wake if missed while asleep |
 | `notify` | `false` | macOS notification on completion/failure |
 | `enabled` | `true` | Set to `false` to disable without deleting |

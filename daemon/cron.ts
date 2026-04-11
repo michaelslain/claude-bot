@@ -1,13 +1,19 @@
 import { homedir } from "os"
 import { join } from "path"
-import { readdir, readFile, writeFile, unlink, rename } from "fs/promises"
+import { readdir, readFile, writeFile, unlink, rename, mkdir } from "fs/promises"
+import { execFile } from "child_process"
+import { promisify } from "util"
 import { sendMessage } from "./session"
+
+const execFileAsync = promisify(execFile)
 import { notify } from "../lib/platform"
 import { parseFrontmatter } from "../lib/frontmatter"
 
 export const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
+const PROCESSES_DIR = join(homedir(), ".claude-bot", "processes")
 const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
 const RUNNING_FILE = join(CRONS_DIR, ".running.json")
+const TRIGGER_DIR = join(CRONS_DIR, ".triggers")
 
 export interface CronExpression {
   minute: string
@@ -27,6 +33,32 @@ export interface CronJob {
   notify: boolean
   model?: string
   effort?: string
+  /** Session timeout in seconds. Default: 300 (5 min). */
+  timeout: number
+  /** Process pattern to monitor after session ends (matched via pgrep -f). */
+  waitFor?: string
+}
+
+const DEFAULT_TIMEOUT = 300
+
+function parseCronFrontmatter(name: string, frontmatter: Record<string, string>, body: string): CronJob | null {
+  const schedule = frontmatter.schedule
+  if (!schedule) return null
+  const cron = parseCronExpression(schedule)
+  if (!cron) return null
+  return {
+    name: frontmatter.name ?? name,
+    schedule,
+    cron,
+    prompt: body,
+    catchup: frontmatter.catchup === "true",
+    enabled: frontmatter.enabled !== "false",
+    notify: frontmatter.notify === "true",
+    model: frontmatter.model,
+    effort: frontmatter.effort,
+    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : DEFAULT_TIMEOUT,
+    waitFor: frontmatter.waitFor,
+  }
 }
 
 export function parseCronExpression(expr: string): CronExpression | null {
@@ -98,23 +130,8 @@ export async function loadCronJobs(): Promise<CronJob[]> {
     try {
       const content = await readFile(join(CRONS_DIR, file), "utf-8")
       const { frontmatter, body } = parseFrontmatter(content)
-
-      const name = frontmatter.name ?? file.replace(/\.md$/, "")
-      const schedule = frontmatter.schedule
-      if (!schedule) continue
-
-      const cron = parseCronExpression(schedule)
-      if (!cron) {
-        console.error(`[cron] Invalid schedule "${schedule}" in ${file}, skipping`)
-        continue
-      }
-
-      const catchup = frontmatter.catchup === "true"
-      const enabled = frontmatter.enabled !== "false"  // default true
-      const notify = frontmatter.notify === "true"
-      const model = frontmatter.model
-      const effort = frontmatter.effort
-      jobs.push({ name, schedule, cron, prompt: body, catchup, enabled, notify, model, effort })
+      const job = parseCronFrontmatter(file.replace(/\.md$/, ""), frontmatter, body)
+      if (job) jobs.push(job)
     } catch {
       // skip unreadable files
     }
@@ -123,6 +140,7 @@ export async function loadCronJobs(): Promise<CronJob[]> {
 }
 
 let cronInterval: ReturnType<typeof setInterval> | null = null
+let triggerInterval: ReturnType<typeof setInterval> | null = null
 const runningJobs = new Set<string>()
 const jobAbortControllers = new Map<string, AbortController>()
 
@@ -219,6 +237,83 @@ function parseCronResult(output: string): "success" | "failed" | "unknown" {
   return "failed"
 }
 
+// ── Protected directory guard ───────────────────────────────────────��──────
+// Snapshot .md files in crons/ and processes/ before a cron session runs,
+// then restore any that were modified or deleted by the session.
+
+async function snapshotDir(dir: string): Promise<Map<string, string>> {
+  const snap = new Map<string, string>()
+  try {
+    const files = await readdir(dir)
+    for (const f of files) {
+      if (!f.endsWith(".md")) continue
+      try {
+        snap.set(f, await readFile(join(dir, f), "utf-8"))
+      } catch { /* skip unreadable */ }
+    }
+  } catch { /* dir doesn't exist yet */ }
+  return snap
+}
+
+async function restoreDir(dir: string, snapshot: Map<string, string>, jobName: string): Promise<void> {
+  // Restore modified or deleted files
+  for (const [file, content] of snapshot) {
+    try {
+      const current = await readFile(join(dir, file), "utf-8")
+      if (current !== content) {
+        console.warn(`[cron] Guard: "${jobName}" modified ${dir}/${file} — reverting`)
+        await writeFile(join(dir, file), content, "utf-8")
+      }
+    } catch {
+      // File was deleted — restore it
+      console.warn(`[cron] Guard: "${jobName}" deleted ${dir}/${file} — restoring`)
+      await writeFile(join(dir, file), content, "utf-8")
+    }
+  }
+  // Delete files that were created by the session (not in snapshot)
+  try {
+    const currentFiles = await readdir(dir)
+    for (const f of currentFiles) {
+      if (!f.endsWith(".md")) continue
+      if (!snapshot.has(f)) {
+        console.warn(`[cron] Guard: "${jobName}" created ${dir}/${f} — removing`)
+        await unlink(join(dir, f))
+      }
+    }
+  } catch { /* dir doesn't exist */ }
+}
+
+// ── Process pattern monitoring ─────────────────────────────────────────────
+// After a cron session ends, if `waitFor` is set, poll for matching processes
+// via pgrep -f. This catches orphaned processes that get reparented to PID 1.
+
+async function hasMatchingProcesses(pattern: string): Promise<boolean> {
+  try {
+    await execFileAsync("pgrep", ["-f", pattern], { timeout: 5000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function waitForProcessPattern(
+  pattern: string,
+  timeoutMs: number,
+  jobName: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (!(await hasMatchingProcesses(pattern))) return
+    console.log(`[cron] "${jobName}": waiting for processes matching "${pattern}"`)
+    await new Promise(resolve => setTimeout(resolve, 5000))
+  }
+
+  if (await hasMatchingProcesses(pattern)) {
+    console.warn(`[cron] "${jobName}": timed out waiting for processes matching "${pattern}"`)
+  }
+}
+
 /**
  * Start a cron job: marks it as running (in-memory + on-disk) synchronously,
  * then runs the session in the background. Callers should await this to ensure
@@ -228,14 +323,28 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   const ac = new AbortController()
   runningJobs.add(job.name)
   jobAbortControllers.set(job.name, ac)
-  // Write .running.json BEFORE starting the session — callers await this
+  const startedAt = Date.now()
   await markRunning(job.name)
+
+  // Snapshot protected directories before running
+  const [cronSnap, procSnap] = await Promise.all([
+    snapshotDir(CRONS_DIR),
+    snapshotDir(PROCESSES_DIR),
+  ])
 
   // Run the actual session in the background (not awaited by caller)
   const sessionPromise = (async () => {
     try {
       const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}`
-      const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac })
+      const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac, timeoutSecs: job.timeout, newSession: true })
+
+      if (job.waitFor) {
+        const remainingMs = Math.max(0, job.timeout * 1000 - (Date.now() - startedAt))
+        if (remainingMs > 0) {
+          await waitForProcessPattern(job.waitFor, remainingMs, job.name)
+        }
+      }
+
       const result = parseCronResult(response.result)
       lastFired[job.name] = { timestamp: new Date().toISOString(), result }
       await saveLastFired(lastFired)
@@ -253,6 +362,11 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
         notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
       }
     } finally {
+      // Restore protected directories if the session modified them
+      await Promise.all([
+        restoreDir(CRONS_DIR, cronSnap, job.name),
+        restoreDir(PROCESSES_DIR, procSnap, job.name),
+      ])
       jobAbortControllers.delete(job.name)
       await markDone(job.name)
       runningJobs.delete(job.name)
@@ -299,6 +413,9 @@ export function startCronScheduler(): void {
     }
   })()
 
+  // Check for MCP trigger files every 5 seconds for fast response
+  triggerInterval = setInterval(() => { processTriggers() }, 5_000)
+
   cronInterval = setInterval(async () => {
     const now = new Date()
     const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
@@ -315,30 +432,19 @@ export function stopCronScheduler(): void {
     clearInterval(cronInterval)
     cronInterval = null
   }
+  if (triggerInterval !== null) {
+    clearInterval(triggerInterval)
+    triggerInterval = null
+  }
 }
 
 // ── Cron CRUD helpers ────────────────────────────────────────────────────────
 
 async function loadCronJob(name: string): Promise<CronJob | null> {
-  const filePath = join(CRONS_DIR, `${name}.md`)
   try {
-    const content = await readFile(filePath, "utf-8")
+    const content = await readFile(join(CRONS_DIR, `${name}.md`), "utf-8")
     const { frontmatter, body } = parseFrontmatter(content)
-    const schedule = frontmatter.schedule
-    if (!schedule) return null
-    const cron = parseCronExpression(schedule)
-    if (!cron) return null
-    return {
-      name: frontmatter.name ?? name,
-      schedule,
-      cron,
-      prompt: body,
-      catchup: frontmatter.catchup === "true",
-      enabled: frontmatter.enabled !== "false",
-      notify: frontmatter.notify === "true",
-      model: frontmatter.model,
-      effort: frontmatter.effort,
-    }
+    return parseCronFrontmatter(name, frontmatter, body)
   } catch {
     return null
   }
@@ -353,6 +459,53 @@ export async function runCronJob(name: string): Promise<{ ok: boolean; error?: s
   const lastFired = await loadLastFired()
   await fireJob(job, lastFired) // await ensures .running.json is written before returning
   return { ok: true }
+}
+
+/**
+ * Write a trigger file so the daemon picks up the run request on its next tick.
+ * Used by the MCP server (separate process) instead of runCronJob directly.
+ */
+export async function requestCronRun(name: string): Promise<{ ok: boolean; error?: string }> {
+  const job = await loadCronJob(name)
+  if (!job) return { ok: false, error: `Cron job "${name}" not found` }
+
+  await mkdir(TRIGGER_DIR, { recursive: true })
+  await writeFile(join(TRIGGER_DIR, name), new Date().toISOString(), "utf-8")
+  return { ok: true }
+}
+
+/**
+ * Check for trigger files written by the MCP server and fire those jobs.
+ */
+async function processTriggers(): Promise<void> {
+  let files: string[]
+  try {
+    files = await readdir(TRIGGER_DIR)
+  } catch {
+    return
+  }
+
+  const triggers = files.filter(f => !f.startsWith("."))
+  if (triggers.length === 0) return
+
+  const lastFired = await loadLastFired()
+  for (const name of triggers) {
+    try { await unlink(join(TRIGGER_DIR, name)) } catch {}
+
+    if (runningJobs.has(name)) {
+      console.log(`[cron] Trigger for "${name}" ignored — already running`)
+      continue
+    }
+
+    const job = await loadCronJob(name)
+    if (!job) {
+      console.warn(`[cron] Trigger for unknown job "${name}" — skipping`)
+      continue
+    }
+
+    console.log(`[cron] Trigger firing: ${name}`)
+    await fireJob(job, lastFired)
+  }
 }
 
 export async function stopCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
@@ -373,12 +526,14 @@ export async function stopCronJob(name: string): Promise<{ ok: boolean; error?: 
   return { ok: true }
 }
 
-function buildCronFile(opts: { name: string; schedule: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean; prompt: string }): string {
+function buildCronFile(opts: { name: string; schedule: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean; timeout?: number; waitFor?: string; prompt: string }): string {
   const lines = ["---"]
   lines.push(`name: ${opts.name}`)
   lines.push(`schedule: ${opts.schedule}`)
   if (opts.model) lines.push(`model: ${opts.model}`)
   if (opts.effort) lines.push(`effort: ${opts.effort}`)
+  if (opts.timeout && opts.timeout !== DEFAULT_TIMEOUT) lines.push(`timeout: ${opts.timeout}`)
+  if (opts.waitFor) lines.push(`waitFor: ${opts.waitFor}`)
   if (opts.catchup) lines.push(`catchup: true`)
   if (opts.notify) lines.push(`notify: true`)
   if (opts.enabled === false) lines.push(`enabled: false`)
@@ -410,7 +565,7 @@ export async function deleteCronJob(name: string): Promise<{ ok: boolean; error?
   }
 }
 
-export async function updateCronJob(name: string, updates: { enabled?: boolean; schedule?: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; prompt?: string }): Promise<{ ok: boolean; error?: string }> {
+export async function updateCronJob(name: string, updates: { enabled?: boolean; schedule?: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; waitFor?: string; prompt?: string }): Promise<{ ok: boolean; error?: string }> {
   const filePath = join(CRONS_DIR, `${name}.md`)
   let content: string
   try {
@@ -430,6 +585,7 @@ export async function updateCronJob(name: string, updates: { enabled?: boolean; 
   if (updates.effort !== undefined) frontmatter.effort = updates.effort
   if (updates.catchup !== undefined) frontmatter.catchup = String(updates.catchup)
   if (updates.notify !== undefined) frontmatter.notify = String(updates.notify)
+  if (updates.waitFor !== undefined) frontmatter.waitFor = updates.waitFor
 
   const newPrompt = updates.prompt ?? body
 
@@ -438,9 +594,11 @@ export async function updateCronJob(name: string, updates: { enabled?: boolean; 
     schedule: frontmatter.schedule!,
     model: frontmatter.model,
     effort: frontmatter.effort,
+    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : undefined,
     catchup: frontmatter.catchup === "true",
     notify: frontmatter.notify === "true",
     enabled: frontmatter.enabled !== "false",
+    waitFor: frontmatter.waitFor,
     prompt: newPrompt,
   }))
   return { ok: true }

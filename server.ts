@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
-import { loadCronJobs, loadLastFired, loadRunning, runCronJob, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
+import { loadCronJobs, loadLastFired, loadRunning, requestCronRun, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
@@ -16,7 +16,7 @@ import { today } from "./lib/json.ts"
 import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
 import { homedir } from "os"
 import { join } from "path"
-import { mkdir } from "fs/promises"
+import { mkdir, readdir, readFile } from "fs/promises"
 
 // ── Tool result helper ────────────────────────────────────────────────────────
 
@@ -148,10 +148,20 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
   await mkdir(join(BOT_DIR, "crons"), { recursive: true })
   await mkdir(join(BOT_DIR, "processes"), { recursive: true })
 
-  // Write default dream cron (every 6 hours)
-  const dreamCronPath = join(BOT_DIR, "crons", "dream.md")
-  if (!(await Bun.file(dreamCronPath).exists())) {
-    await Bun.write(dreamCronPath, `---\nname: dream\nschedule: 0 */6 * * *\n---\n\nRun dream_run to consolidate and improve memory. Merge duplicates, add backlinks, remove stale notes.\n`)
+  // Copy default crons from repo defaults (don't overwrite user customizations)
+  const defaultCronsDir = join(import.meta.dir, "defaults", "crons")
+  try {
+    const defaultFiles = await readdir(defaultCronsDir)
+    for (const file of defaultFiles) {
+      if (!file.endsWith(".md")) continue
+      const destPath = join(BOT_DIR, "crons", file)
+      if (!(await Bun.file(destPath).exists())) {
+        const content = await readFile(join(defaultCronsDir, file), "utf-8")
+        await Bun.write(destPath, content)
+      }
+    }
+  } catch {
+    // defaults dir missing — skip
   }
 
   // Write CLAUDE.md only if it doesn't exist AND skill hasn't written one
@@ -613,7 +623,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "cron_run": {
       const { name: cronName } = args as { name: string }
-      return toResult(await runCronJob(cronName))
+      return toResult(await requestCronRun(cronName))
     }
 
     case "cron_stop": {

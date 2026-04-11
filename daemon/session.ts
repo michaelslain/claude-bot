@@ -37,6 +37,10 @@ export interface SendOptions {
   model?: string
   effort?: string
   abortController?: AbortController
+  /** Session timeout in seconds. AbortController signal fires when exceeded. */
+  timeoutSecs?: number
+  /** Start a fresh session instead of resuming the existing one. */
+  newSession?: boolean
 }
 
 export async function sendMessage(message: string, opts?: SendOptions): Promise<BotResponse> {
@@ -53,11 +57,19 @@ export async function sendMessage(message: string, opts?: SendOptions): Promise<
     options.thinkingBudget = opts.effort === "high" ? "high" : opts.effort === "low" ? "low" : "medium"
   }
 
-  if (opts?.abortController) {
-    options.abortController = opts.abortController
+  const needsAc = opts?.abortController || opts?.timeoutSecs
+  const ac = opts?.abortController ?? (needsAc ? new AbortController() : undefined)
+  if (ac) options.abortController = ac
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  if (ac && opts?.timeoutSecs && opts.timeoutSecs > 0) {
+    timeoutId = setTimeout(() => {
+      console.log(`[session] Timeout reached (${opts.timeoutSecs}s), aborting session`)
+      ac.abort()
+    }, opts.timeoutSecs * 1000)
   }
 
-  if (existingSessionId) {
+  if (existingSessionId && !opts?.newSession) {
     options.resume = existingSessionId
   }
 
@@ -66,15 +78,19 @@ export async function sendMessage(message: string, opts?: SendOptions): Promise<
   const q = claudeQuery({ prompt: message, options: options as Parameters<typeof claudeQuery>[0]["options"] })
   let resultText = ""
 
-  for await (const event of q) {
-    const msg = event as SdkMessage
-    if (msg.session_id && msg.session_id !== latestSessionId) {
-      latestSessionId = msg.session_id
-      await saveSessionId(latestSessionId)
+  try {
+    for await (const event of q) {
+      const msg = event as SdkMessage
+      if (msg.session_id && msg.session_id !== latestSessionId) {
+        latestSessionId = msg.session_id
+        await saveSessionId(latestSessionId)
+      }
+      if (msg.type === "result" && msg.subtype === "success") {
+        resultText = (msg.result ?? "").trim()
+      }
     }
-    if (msg.type === "result" && msg.subtype === "success") {
-      resultText = (msg.result ?? "").trim()
-    }
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
   }
 
   return { result: resultText, sessionId: latestSessionId }
