@@ -90,7 +90,16 @@ describe("searchMemory", () => {
     const results = await searchMemory("fix the authentication bug", tempDir);
     const names = results.map((n) => n.name);
     expect(names).toContain("Alice");
+  });
+
+  test("ranks exact matches above stem matches", async () => {
+    const results = await searchMemory("authentication project login sessions", tempDir);
+    const names = results.map((n) => n.name);
+    // ProjectAuth matches multiple keywords exactly (project, login, sessions)
+    // Alice matches one keyword exactly (authentication)
     expect(names).toContain("ProjectAuth");
+    expect(names).toContain("Alice");
+    expect(names.indexOf("ProjectAuth")).toBeLessThan(names.indexOf("Alice"));
   });
 
   test("returns empty array when no keywords match", async () => {
