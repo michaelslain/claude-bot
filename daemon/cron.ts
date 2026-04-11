@@ -124,16 +124,31 @@ export async function loadCronJobs(): Promise<CronJob[]> {
 let cronInterval: ReturnType<typeof setInterval> | null = null
 const runningJobs = new Set<string>()
 
-async function loadLastFired(): Promise<Record<string, string>> {
+export interface LastFiredEntry {
+  timestamp: string
+  result: "success" | "failed"
+}
+
+export async function loadLastFired(): Promise<Record<string, LastFiredEntry>> {
   try {
     const raw = await readFile(LAST_FIRED_FILE, "utf-8")
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw)
+    // Migrate old format (plain string timestamps) to new format
+    const result: Record<string, LastFiredEntry> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "string") {
+        result[key] = { timestamp: value, result: "success" }
+      } else {
+        result[key] = value as LastFiredEntry
+      }
+    }
+    return result
   } catch {
     return {}
   }
 }
 
-async function saveLastFired(data: Record<string, string>): Promise<void> {
+async function saveLastFired(data: Record<string, LastFiredEntry>): Promise<void> {
   await writeFile(LAST_FIRED_FILE, JSON.stringify(data, null, 2), "utf-8")
 }
 
@@ -145,27 +160,29 @@ function getIntervalMs(cron: CronExpression): number {
   return 24 * 3600_000 // default: assume daily
 }
 
-function shouldCatchUp(job: CronJob, lastFired: Record<string, string>): boolean {
+function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>): boolean {
   if (!job.catchup) return false
   const last = lastFired[job.name]
   if (!last) return true // never fired — catch up
-  const elapsed = Date.now() - new Date(last).getTime()
+  const elapsed = Date.now() - new Date(last.timestamp).getTime()
   const interval = getIntervalMs(job.cron)
   // Missed if more than 1.5x the interval has passed since last fire
   return elapsed > interval * 1.5
 }
 
-async function fireJob(job: CronJob, lastFired: Record<string, string>): Promise<void> {
+async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>): Promise<void> {
   runningJobs.add(job.name)
   try {
     const response = await sendMessage(`[Cron: ${job.name}] ${job.prompt}`, { model: job.model, effort: job.effort })
-    lastFired[job.name] = new Date().toISOString()
+    lastFired[job.name] = { timestamp: new Date().toISOString(), result: "success" }
     await saveLastFired(lastFired)
     if (job.notify) {
       notify(`claude-bot: ${job.name}`, response.result || "Cron job completed.")
     }
   } catch (err) {
     console.error(`[cron] Failed to fire job "${job.name}":`, err)
+    lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
+    await saveLastFired(lastFired)
     if (job.notify) {
       notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
     }

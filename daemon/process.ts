@@ -123,7 +123,7 @@ function spawnProcess(mp: ManagedProcess): void {
   console.log(`[process] Started "${def.name}" (PID ${mp.proc.pid})`)
 
   // Watch for exit
-  child.on("exit", (code, signal) => {
+  mp.proc.on("exit", (code, signal) => {
     if (mp.stopping) return
     const exitInfo = signal ? `signal ${signal}` : `code ${code}`
     console.log(`[process] "${def.name}" exited with ${exitInfo}`)

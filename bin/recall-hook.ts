@@ -34,6 +34,6 @@ try {
 
   process.stdout.write(JSON.stringify(output));
 } catch (err) {
-  console.error("[memory-hook]", err);
+  console.error("[recall-hook]", err);
   process.exit(0);
 }

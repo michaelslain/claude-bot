@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
-import { loadCronJobs, runCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
+import { loadCronJobs, loadLastFired, runCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
@@ -518,13 +518,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const cronJobs = await loadCronJobs()
       const sessionId = await getSessionId()
       const processes = listProcesses()
+      const lastFired = await loadLastFired()
 
       return toResult({
         ok: true,
         daemon: { running: daemonPid !== null, pid: daemonPid },
         session: sessionId ?? null,
         memory: { noteCount },
-        crons: cronJobs.map((c) => ({ name: c.name, schedule: c.schedule })),
+        crons: cronJobs.map((c) => {
+          const entry = lastFired[c.name]
+          return {
+            name: c.name,
+            schedule: c.schedule,
+            lastRun: entry?.timestamp ?? null,
+            lastResult: entry?.result ?? null,
+          }
+        }),
         processes,
       })
     }
@@ -557,19 +566,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case "cron_list": {
       const jobs = await loadCronJobs()
+      const lastFired = await loadLastFired()
       return toResult({
         ok: true,
         count: jobs.length,
-        crons: jobs.map((j) => ({
-          name: j.name,
-          schedule: j.schedule,
-          enabled: j.enabled,
-          model: j.model ?? "haiku",
-          effort: j.effort,
-          catchup: j.catchup,
-          notify: j.notify,
-          prompt: j.prompt.slice(0, 200) + (j.prompt.length > 200 ? "..." : ""),
-        })),
+        crons: jobs.map((j) => {
+          const entry = lastFired[j.name]
+          return {
+            name: j.name,
+            schedule: j.schedule,
+            enabled: j.enabled,
+            model: j.model ?? "haiku",
+            effort: j.effort,
+            catchup: j.catchup,
+            notify: j.notify,
+            lastRun: entry?.timestamp ?? null,
+            lastResult: entry?.result ?? null,
+            prompt: j.prompt.slice(0, 200) + (j.prompt.length > 200 ? "..." : ""),
+          }
+        }),
       })
     }
 
@@ -634,7 +649,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-// Ensure memory hook is registered in global Claude settings
+// Ensure hooks are registered in global Claude settings
 interface HookEntry { hooks?: Array<{ type?: string; command?: string }> }
 interface ClaudeSettings {
   hooks?: { UserPromptSubmit?: HookEntry[] }
@@ -650,23 +665,47 @@ try {
     // File may not exist yet — start with empty settings
   }
 
-  const hookCommand = `bun run ${join(import.meta.dir, "bin", "memory-hook.ts")}`
-
   if (!settings.hooks) settings.hooks = {}
   if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = []
 
-  const existing = settings.hooks.UserPromptSubmit.some((entry) =>
-    entry.hooks?.some((h) => h.command?.includes("memory-hook.ts"))
+  const recallHookCommand = `bun run ${join(import.meta.dir, "bin", "recall-hook.ts")}`
+  const collectHookCommand = `bun run ${join(import.meta.dir, "bin", "collect-hook.ts")}`
+
+  // Remove any old memory-hook.ts entries (renamed to recall-hook.ts)
+  for (const entry of settings.hooks.UserPromptSubmit) {
+    if (entry.hooks) {
+      entry.hooks = entry.hooks.filter((h) => !h.command?.includes("memory-hook.ts"))
+    }
+  }
+  // Clean up entries left with empty hooks arrays
+  settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+    (entry) => entry.hooks && entry.hooks.length > 0
   )
 
-  if (!existing) {
+  // Ensure recall-hook is registered
+  const hasRecallHook = settings.hooks.UserPromptSubmit.some((entry) =>
+    entry.hooks?.some((h) => h.command?.includes("recall-hook.ts"))
+  )
+  if (!hasRecallHook) {
     settings.hooks.UserPromptSubmit.push({
-      hooks: [{ type: "command", command: hookCommand }],
+      hooks: [{ type: "command", command: recallHookCommand }],
     })
-    await Bun.write(globalSettingsPath, JSON.stringify(settings, null, 2) + "\n")
   }
+
+  // Ensure collect-hook is registered
+  const hasCollectHook = settings.hooks.UserPromptSubmit.some((entry) =>
+    entry.hooks?.some((h) => h.command?.includes("collect-hook.ts"))
+  )
+  if (!hasCollectHook) {
+    settings.hooks.UserPromptSubmit.push({
+      hooks: [{ type: "command", command: collectHookCommand }],
+    })
+  }
+
+  // Always write to ensure migration is applied
+  await Bun.write(globalSettingsPath, JSON.stringify(settings, null, 2) + "\n")
 } catch (err) {
-  console.error("[server] Failed to register memory hook:", err)
+  console.error("[server] Failed to register hooks:", err)
 }
 
 const transport = new StdioServerTransport()

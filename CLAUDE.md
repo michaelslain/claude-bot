@@ -113,7 +113,7 @@ claude-bot/
     query.test.ts     # tests
     dream.ts          # memory consolidation via bot session
   bin/
-    memory-hook.ts    # UserPromptSubmit hook: injects relevant memories into context
+    recall-hook.ts    # UserPromptSubmit hook: injects relevant memories into context
     collect-hook.ts   # UserPromptSubmit hook: saves prompts as auto notes
   lib/
     json.ts           # shared JSON parsing, date utils
