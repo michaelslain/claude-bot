@@ -1,10 +1,6 @@
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk"
-import { homedir } from "os"
-import { join } from "path"
 import { readFile, writeFile, mkdir } from "fs/promises"
-
-const BOT_DIR = join(homedir(), ".claude-bot")
-const SESSION_FILE = join(BOT_DIR, "session-id")
+import { BOT_DIR, SESSION_FILE } from "../lib/config.ts"
 
 /** Messages emitted by the Claude Agent SDK query stream. */
 interface SdkMessage {

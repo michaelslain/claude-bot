@@ -3,6 +3,7 @@ import type { NoteType } from "./graph.ts"
 import { sendMessage } from "../daemon/session.ts"
 import { parseJsonResponse } from "../lib/json.ts"
 import { today } from "../lib/json.ts"
+import { DEFAULT_DREAM_INTERVAL_MS } from "../lib/config.ts"
 
 async function dispatch(prompt: string): Promise<string> {
   const response = await sendMessage(prompt)
@@ -17,7 +18,7 @@ export interface DreamConfig {
 }
 
 const DEFAULT_CONFIG: DreamConfig = {
-  intervalMs: 6 * 60 * 60 * 1000, // 6 hours
+  intervalMs: DEFAULT_DREAM_INTERVAL_MS,
   enabled: true,
 }
 

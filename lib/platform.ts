@@ -2,16 +2,15 @@ import { homedir } from "os"
 import { join } from "path"
 import { spawnSync } from "child_process"
 import { mkdir } from "fs/promises"
+import { LAUNCHD_LABEL, SYSTEMD_SERVICE_NAME } from "./config.ts"
 
 const IS_LINUX = process.platform === "linux"
-const LABEL = "com.claude-bot.daemon"
-const SERVICE_NAME = "claude-bot"
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
 export function daemonConfigPath(): string {
-  if (IS_LINUX) return join(homedir(), ".config", "systemd", "user", `${SERVICE_NAME}.service`)
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`)
+  if (IS_LINUX) return join(homedir(), ".config", "systemd", "user", `${SYSTEMD_SERVICE_NAME}.service`)
+  return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`)
 }
 
 // ── Config generation ────────────────────────────────────────────────────────
@@ -33,7 +32,7 @@ function generatePlist({ bunPath, daemonEntry, logsDir, workDir, envPath }: Daem
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>${LABEL}</string>
+    <key>Label</key><string>${LAUNCHD_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>${bunPath}</string>
@@ -78,7 +77,7 @@ export async function installDaemon(configPath: string, config: string): Promise
     await Bun.write(configPath, config)
     const reload = spawnSync("systemctl", ["--user", "daemon-reload"])
     if (reload.status !== 0) return { ok: false, error: `daemon-reload failed: ${reload.stderr?.toString()}` }
-    const enable = spawnSync("systemctl", ["--user", "enable", "--now", SERVICE_NAME])
+    const enable = spawnSync("systemctl", ["--user", "enable", "--now", SYSTEMD_SERVICE_NAME])
     if (enable.status !== 0) return { ok: false, error: `enable failed: ${enable.stderr?.toString()}` }
     return { ok: true }
   }
@@ -90,8 +89,8 @@ export async function installDaemon(configPath: string, config: string): Promise
 
 export function unloadDaemon(configPath: string): void {
   if (IS_LINUX) {
-    spawnSync("systemctl", ["--user", "stop", SERVICE_NAME])
-    spawnSync("systemctl", ["--user", "disable", SERVICE_NAME])
+    spawnSync("systemctl", ["--user", "stop", SYSTEMD_SERVICE_NAME])
+    spawnSync("systemctl", ["--user", "disable", SYSTEMD_SERVICE_NAME])
   } else {
     spawnSync("launchctl", ["unload", configPath])
   }
@@ -101,7 +100,7 @@ export async function reloadDaemon(configPath: string, config: string): Promise<
   await Bun.write(configPath, config)
   if (IS_LINUX) {
     spawnSync("systemctl", ["--user", "daemon-reload"])
-    const restart = spawnSync("systemctl", ["--user", "restart", SERVICE_NAME])
+    const restart = spawnSync("systemctl", ["--user", "restart", SYSTEMD_SERVICE_NAME])
     if (restart.status !== 0) return { ok: false, error: `restart failed: ${restart.stderr?.toString()}` }
     return { ok: true }
   }

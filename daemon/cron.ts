@@ -1,4 +1,3 @@
-import { homedir } from "os"
 import { join } from "path"
 import { readdir, readFile, writeFile, unlink, rename, mkdir } from "fs/promises"
 import { execFile } from "child_process"
@@ -9,11 +8,8 @@ const execFileAsync = promisify(execFile)
 import { notify } from "../lib/platform"
 import { parseFrontmatter } from "../lib/frontmatter"
 
-export const CRONS_DIR = join(homedir(), ".claude-bot", "crons")
-const PROCESSES_DIR = join(homedir(), ".claude-bot", "processes")
-const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
-const RUNNING_FILE = join(CRONS_DIR, ".running.json")
-const TRIGGER_DIR = join(CRONS_DIR, ".triggers")
+export { CRONS_DIR } from "../lib/config.ts"
+import { CRONS_DIR, PROCESSES_DIR, LAST_FIRED_FILE, RUNNING_FILE, TRIGGER_DIR, DEFAULT_CRON_TIMEOUT, CRON_CHECK_INTERVAL_MS, TRIGGER_CHECK_INTERVAL_MS, SHUTDOWN_POLL_MS } from "../lib/config.ts"
 
 export interface CronExpression {
   minute: string
@@ -39,8 +35,6 @@ export interface CronJob {
   waitFor?: string
 }
 
-const DEFAULT_TIMEOUT = 300
-
 function parseCronFrontmatter(name: string, frontmatter: Record<string, string>, body: string): CronJob | null {
   const schedule = frontmatter.schedule
   if (!schedule) return null
@@ -56,7 +50,7 @@ function parseCronFrontmatter(name: string, frontmatter: Record<string, string>,
     notify: frontmatter.notify === "true",
     model: frontmatter.model,
     effort: frontmatter.effort,
-    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : DEFAULT_TIMEOUT,
+    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : DEFAULT_CRON_TIMEOUT,
     waitFor: frontmatter.waitFor,
   }
 }
@@ -436,7 +430,7 @@ export function startCronScheduler(): void {
   })()
 
   // Check for MCP trigger files every 5 seconds for fast response
-  triggerInterval = setInterval(() => { processTriggers() }, 5_000)
+  triggerInterval = setInterval(() => { processTriggers() }, TRIGGER_CHECK_INTERVAL_MS)
 
   cronInterval = setInterval(async () => {
     const now = new Date()
@@ -446,7 +440,7 @@ export function startCronScheduler(): void {
         fireJob(job, lastFired)
       }
     }
-  }, 60_000)
+  }, CRON_CHECK_INTERVAL_MS)
 }
 
 export function stopCronScheduler(): void {
@@ -471,7 +465,7 @@ export async function waitForRunningJobs(timeoutMs: number = 10_000): Promise<vo
 
   const start = Date.now()
   while (runningJobs.size > 0 && Date.now() - start < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_POLL_MS))
   }
 
   if (runningJobs.size > 0) {
@@ -576,7 +570,7 @@ function buildCronFile(opts: { name: string; schedule: string; model?: string; e
   lines.push(`schedule: ${opts.schedule}`)
   if (opts.model) lines.push(`model: ${opts.model}`)
   if (opts.effort) lines.push(`effort: ${opts.effort}`)
-  if (opts.timeout && opts.timeout !== DEFAULT_TIMEOUT) lines.push(`timeout: ${opts.timeout}`)
+  if (opts.timeout && opts.timeout !== DEFAULT_CRON_TIMEOUT) lines.push(`timeout: ${opts.timeout}`)
   if (opts.waitFor) lines.push(`waitFor: ${opts.waitFor}`)
   if (opts.catchup) lines.push(`catchup: true`)
   if (opts.notify) lines.push(`notify: true`)

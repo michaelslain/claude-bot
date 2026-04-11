@@ -2,7 +2,7 @@
 
 Persistent Claude Code agent with long-term memory. A thin Bun daemon keeps adapter connections and cron jobs alive, routing all messages through one persistent Claude Code session via the agent SDK.
 
-Default to using Bun instead of Node.js. Bun automatically loads .env, so don't use dotenv.
+Default to using Bun instead of Node.js.
 
 ## Architecture
 
@@ -20,6 +20,10 @@ All roads lead to one Claude Code session:
 - Adapter message (future) → `sendMessage()` → same session
 
 The session has access to memory MCP tools, full Claude Code capabilities (bash, files, crons, subagents), and a CLAUDE.md personality in `~/.claude-bot/`.
+
+## Configuration
+
+All config lives in `lib/config.ts` — paths, timeouts, intervals, service names. No `.env` files. To change a default, edit `lib/config.ts`.
 
 ## MCP Tools
 

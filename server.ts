@@ -14,6 +14,7 @@ import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
 import { today } from "./lib/json.ts"
 import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
+import { BOT_DIR, LOGS_DIR, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "./lib/config.ts"
 import { homedir } from "os"
 import { join } from "path"
 import { mkdir, readdir, readFile } from "fs/promises"
@@ -28,7 +29,6 @@ function toResult(data: unknown) {
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
-const BOT_DIR = join(homedir(), ".claude-bot")
 const DAEMON_PATH = daemonConfigPath()
 const SERVER_PATH = join(import.meta.dir, "server.ts")
 
@@ -137,7 +137,7 @@ function daemonOpts() {
   return {
     bunPath,
     daemonEntry: join(import.meta.dir, "daemon", "index.ts"),
-    logsDir: join(BOT_DIR, "logs"),
+    logsDir: LOGS_DIR,
     workDir: BOT_DIR,
     envPath: buildPath(),
   }
@@ -148,11 +148,10 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
     return { ok: false, message: "Already installed. Use 'restart' to reload, or 'uninstall' first to reinstall." }
   }
 
-  const logsDir = join(BOT_DIR, "logs")
-  await mkdir(logsDir, { recursive: true })
-  await mkdir(join(BOT_DIR, "memory"), { recursive: true })
-  await mkdir(join(BOT_DIR, "crons"), { recursive: true })
-  await mkdir(join(BOT_DIR, "processes"), { recursive: true })
+  await mkdir(LOGS_DIR, { recursive: true })
+  await mkdir(MEMORY_DIR, { recursive: true })
+  await mkdir(CRONS_DIR, { recursive: true })
+  await mkdir(PROCESSES_DIR, { recursive: true })
 
   // Copy default crons from repo defaults (don't overwrite user customizations)
   const defaultCronsDir = join(import.meta.dir, "defaults", "crons")

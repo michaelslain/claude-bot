@@ -1,13 +1,8 @@
-import { homedir } from "os"
-import { join } from "path"
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
 import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons, waitForRunningJobs } from "./cron.ts"
 import { startProcesses, stopProcesses } from "./process.ts"
-
-const BOT_DIR = join(homedir(), ".claude-bot")
-const PID_FILE = join(BOT_DIR, "daemon.pid")
-const LOGS_DIR = join(BOT_DIR, "logs")
+import { BOT_DIR, PID_FILE, LOGS_DIR, SHUTDOWN_TIMEOUT_MS, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "../lib/config.ts"
 
 function log(message: string): void {
   const timestamp = new Date().toISOString()
@@ -17,9 +12,9 @@ function log(message: string): void {
 async function ensureDirs(): Promise<void> {
   await mkdir(BOT_DIR, { recursive: true })
   await mkdir(LOGS_DIR, { recursive: true })
-  await mkdir(join(BOT_DIR, "crons"), { recursive: true })
-  await mkdir(join(BOT_DIR, "memory"), { recursive: true })
-  await mkdir(join(BOT_DIR, "processes"), { recursive: true })
+  await mkdir(CRONS_DIR, { recursive: true })
+  await mkdir(MEMORY_DIR, { recursive: true })
+  await mkdir(PROCESSES_DIR, { recursive: true })
 }
 
 async function writePid(): Promise<void> {
@@ -33,7 +28,7 @@ async function removePid(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}, shutting down...`)
   stopCronScheduler()
-  await waitForRunningJobs(10_000)
+  await waitForRunningJobs(SHUTDOWN_TIMEOUT_MS)
   stopProcesses()
   await removePid()
   log("Daemon stopped")

@@ -4,9 +4,7 @@ import { readdir, readFile } from "fs/promises"
 import { spawn as nodeSpawn, type ChildProcess } from "child_process"
 import { openSync, closeSync } from "fs"
 import { parseFrontmatter } from "../lib/frontmatter"
-
-const PROCESSES_DIR = join(homedir(), ".claude-bot", "processes")
-const LOGS_DIR = join(homedir(), ".claude-bot", "logs")
+import { PROCESSES_DIR, LOGS_DIR, RESTART_BACKOFF_RESET_MS, RESTART_BACKOFF_MAX_MS } from "../lib/config.ts"
 
 export interface ProcessDef {
   name: string
@@ -140,10 +138,10 @@ function spawnProcess(mp: ManagedProcess): void {
 
     // Reset backoff after 5 min of stable running
     const uptime = Date.now() - mp.lastStart
-    if (uptime >= 5 * 60_000) {
+    if (uptime >= RESTART_BACKOFF_RESET_MS) {
       mp.backoff = def.restartDelay
     } else {
-      mp.backoff = Math.min(mp.backoff * 2, 60_000)
+      mp.backoff = Math.min(mp.backoff * 2, RESTART_BACKOFF_MAX_MS)
     }
 
     console.log(`[process] Restarting "${def.name}" in ${mp.backoff}ms (restart #${mp.restarts})`)
