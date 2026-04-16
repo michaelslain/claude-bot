@@ -45,6 +45,15 @@ async function main(): Promise<void> {
   await startProcesses()
   log("Process manager started")
 
+  // Recover crons that were interrupted by the previous shutdown BEFORE starting
+  // the scheduler. Recovery re-fires interrupted jobs and populates the in-memory
+  // runningJobs set; the scheduler's catch-up pass then correctly skips them via
+  // the `!runningJobs.has(job.name)` guard. Reversing this order causes catch-up
+  // to markRunning first, after which recovery sees those jobs already running
+  // and markDone's them — wiping live entries from .running.json.
+  // Safe to run before session init because fireJob uses newSession: true.
+  await recoverInterruptedCrons()
+
   // Start cron scheduler (tick loop only — crons wait for session on fire)
   startCronScheduler()
   log("Cron scheduler started")
@@ -60,9 +69,6 @@ async function main(): Promise<void> {
     log(`Warning: Failed to initialize bot session: ${err}`)
     log("Continuing anyway — session will be created on first message")
   }
-
-  // Recover crons that were interrupted by the previous shutdown
-  await recoverInterruptedCrons()
 
   const sessionId = await getSessionId()
   log(`Daemon ready (session: ${sessionId ?? "pending"})`)

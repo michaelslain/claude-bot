@@ -163,10 +163,39 @@ export async function loadLastFired(): Promise<Record<string, LastFiredEntry>> {
   }
 }
 
-async function saveLastFired(data: Record<string, LastFiredEntry>): Promise<void> {
-  const tmp = LAST_FIRED_FILE + ".tmp"
+// Per-file serial write queue. Without this, two concurrent saves race on the
+// shared .tmp filename (ENOENT on rename) AND clobber each other's updates
+// (load-modify-save read the same baseline, last writer wins).
+const writeQueues = new Map<string, Promise<unknown>>()
+
+function enqueueWrite<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeQueues.get(file) ?? Promise.resolve()
+  const next = prev.catch(() => {}).then(fn)
+  writeQueues.set(file, next)
+  // Don't leak the chain forever: when this run is the tail, drop the entry.
+  next.catch(() => {}).finally(() => {
+    if (writeQueues.get(file) === next) writeQueues.delete(file)
+  })
+  return next
+}
+
+async function atomicWriteJson(file: string, data: unknown): Promise<void> {
+  // Unique per-write tmp name so even outside the mutex two writers can't collide.
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
   await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8")
-  await rename(tmp, LAST_FIRED_FILE)
+  await rename(tmp, file)
+}
+
+/**
+ * Read-modify-write LAST_FIRED_FILE under the file's serial queue.
+ * Always uses fresh on-disk state so concurrent updates merge instead of clobbering.
+ */
+async function updateLastFired(name: string, entry: LastFiredEntry): Promise<void> {
+  await enqueueWrite(LAST_FIRED_FILE, async () => {
+    const data = await loadLastFired()
+    data[name] = entry
+    await atomicWriteJson(LAST_FIRED_FILE, data)
+  })
 }
 
 // ── Running crons tracking ──────────────────────────────────────────────────
@@ -184,25 +213,22 @@ export async function loadRunning(): Promise<Record<string, RunningEntry>> {
   }
 }
 
-async function saveRunning(data: Record<string, RunningEntry>): Promise<void> {
-  // Atomic write: temp file + rename to avoid partial reads
-  const tmp = RUNNING_FILE + ".tmp"
-  await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8")
-  await rename(tmp, RUNNING_FILE)
-}
-
 async function markRunning(name: string): Promise<void> {
   console.log(`[cron] markRunning: ${name}`)
-  const data = await loadRunning()
-  data[name] = { startedAt: new Date().toISOString() }
-  await saveRunning(data)
+  await enqueueWrite(RUNNING_FILE, async () => {
+    const data = await loadRunning()
+    data[name] = { startedAt: new Date().toISOString() }
+    await atomicWriteJson(RUNNING_FILE, data)
+  })
 }
 
 async function markDone(name: string): Promise<void> {
   console.log(`[cron] markDone: ${name}`)
-  const data = await loadRunning()
-  delete data[name]
-  await saveRunning(data)
+  await enqueueWrite(RUNNING_FILE, async () => {
+    const data = await loadRunning()
+    delete data[name]
+    await atomicWriteJson(RUNNING_FILE, data)
+  })
 }
 
 function getIntervalMs(cron: CronExpression): number {
@@ -356,8 +382,9 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       }
 
       const result = parseCronResult(response.result)
-      lastFired[job.name] = { timestamp: new Date().toISOString(), result }
-      await saveLastFired(lastFired)
+      const entry: LastFiredEntry = { timestamp: new Date().toISOString(), result }
+      lastFired[job.name] = entry
+      await updateLastFired(job.name, entry)
       if (job.notify) {
         const status = result === "success" ? "completed" : result === "failed" ? "failed" : "completed (unknown result)"
         notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
@@ -366,14 +393,16 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       if (ac.signal.aborted) {
         // Record as killed if stopCronJob hasn't already
         if (!lastFired[job.name] || lastFired[job.name].result !== "killed") {
-          lastFired[job.name] = { timestamp: new Date().toISOString(), result: "killed" }
-          await saveLastFired(lastFired)
+          const entry: LastFiredEntry = { timestamp: new Date().toISOString(), result: "killed" }
+          lastFired[job.name] = entry
+          await updateLastFired(job.name, entry)
         }
         return
       }
       console.error(`[cron] Failed to fire job "${job.name}":`, err)
-      lastFired[job.name] = { timestamp: new Date().toISOString(), result: "failed" }
-      await saveLastFired(lastFired)
+      const entry: LastFiredEntry = { timestamp: new Date().toISOString(), result: "failed" }
+      lastFired[job.name] = entry
+      await updateLastFired(job.name, entry)
       if (job.notify) {
         notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
       }
@@ -393,6 +422,13 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   sessionPromise.catch((err) => console.error(`[cron] Unhandled error in "${job.name}":`, err))
 }
 
+/**
+ * Re-fire any crons that were still in .running.json when the daemon died.
+ * MUST be called BEFORE startCronScheduler(): recovery populates runningJobs
+ * so the scheduler's catch-up pass skips these jobs. If startCronScheduler()
+ * runs first, its catch-up IIFE adds jobs to runningJobs, and the branch below
+ * at "!runningJobs.has(name)" flips — the else branch markDone()s live jobs.
+ */
 export async function recoverInterruptedCrons(): Promise<void> {
   const running = await loadRunning()
   const names = Object.keys(running)
@@ -436,7 +472,11 @@ export function startCronScheduler(): void {
     const now = new Date()
     const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
     for (const job of jobs) {
-      if (job.enabled && shouldFire(job.cron, now) && !runningJobs.has(job.name)) {
+      if (!job.enabled || runningJobs.has(job.name)) continue
+      // Fire on schedule OR when overdue (catchup). Without the catchup
+      // check here, a missed/failed/killed run waits until the next daemon
+      // restart to be retried.
+      if (shouldFire(job.cron, now) || shouldCatchUp(job, lastFired)) {
         fireJob(job, lastFired)
       }
     }
@@ -553,9 +593,7 @@ export async function stopCronJob(name: string): Promise<{ ok: boolean; error?: 
   ac.abort()
 
   // Record as killed
-  const lastFired = await loadLastFired()
-  lastFired[name] = { timestamp: new Date().toISOString(), result: "killed" }
-  await saveLastFired(lastFired)
+  await updateLastFired(name, { timestamp: new Date().toISOString(), result: "killed" })
 
   // Clean up running state (fireJob's finally block will also run, but we do it eagerly)
   await markDone(name)
