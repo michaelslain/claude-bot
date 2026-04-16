@@ -90,11 +90,32 @@ interface ManagedProcess {
 const managed = new Map<string, ManagedProcess>()
 
 function killProcessGroup(mp: ManagedProcess): void {
-  if (mp.proc?.pid) {
-    // Negative PID kills the entire process group (detached: true gives each child its own)
-    try { process.kill(-mp.proc.pid, "SIGTERM") } catch {}
+  const pid = mp.proc?.pid
+  if (!pid) return
+  // Try the process group first (detached: true gives each child its own).
+  // Fall back to direct pid if the group-kill fails (EPERM, ESRCH, etc.) —
+  // belt-and-suspenders so a single errno doesn't orphan the child.
+  try { process.kill(-pid, "SIGTERM") } catch {
+    try { process.kill(pid, "SIGTERM") } catch {}
   }
-  mp.proc = null
+  // Note: intentionally do NOT clear mp.proc here. The exit handler needs it,
+  // and stopProcesses polls mp.proc.pid to confirm actual exit before SIGKILL.
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function forceKill(mp: ManagedProcess): void {
+  const pid = mp.proc?.pid
+  if (!pid) return
+  try { process.kill(-pid, "SIGKILL") } catch {}
+  try { process.kill(pid, "SIGKILL") } catch {}
 }
 
 function spawnProcess(mp: ManagedProcess): void {
@@ -170,11 +191,36 @@ export async function startProcesses(): Promise<void> {
   }
 }
 
-export function stopProcesses(): void {
-  for (const [, mp] of managed) {
+/**
+ * Send SIGTERM to all managed children, wait up to `timeoutMs` for them to exit,
+ * then SIGKILL any survivor. Without this, a daemon shutdown that completes
+ * before the kernel delivers SIGTERM can orphan the child — it reparents to
+ * PID 1 and keeps running. Multiple daemon restarts then accumulate orphans.
+ */
+export async function stopProcesses(timeoutMs: number = 3000): Promise<void> {
+  const active = Array.from(managed.values()).filter((mp) => mp.proc?.pid)
+
+  for (const mp of active) {
     mp.stopping = true
     killProcessGroup(mp)
   }
+
+  // Poll until all children exit, or timeout hits
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const stillAlive = active.filter((mp) => mp.proc?.pid && isAlive(mp.proc.pid))
+    if (stillAlive.length === 0) break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
+  // Escalate to SIGKILL for any survivors
+  for (const mp of active) {
+    if (mp.proc?.pid && isAlive(mp.proc.pid)) {
+      console.warn(`[process] "${mp.def.name}" (PID ${mp.proc.pid}) did not exit on SIGTERM — sending SIGKILL`)
+      forceKill(mp)
+    }
+  }
+
   managed.clear()
 }
 

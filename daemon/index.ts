@@ -29,7 +29,7 @@ async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}, shutting down...`)
   stopCronScheduler()
   await waitForRunningJobs(SHUTDOWN_TIMEOUT_MS)
-  stopProcesses()
+  await stopProcesses()
   await removePid()
   log("Daemon stopped")
   process.exit(0)
