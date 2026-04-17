@@ -397,12 +397,13 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       }
     } catch (err) {
       if (ac.signal.aborted) {
-        // Record as killed if stopCronJob hasn't already
-        if (!lastFired[job.name] || lastFired[job.name].result !== "killed") {
-          const entry: LastFiredEntry = { timestamp: new Date().toISOString(), result: "killed" }
-          lastFired[job.name] = entry
-          await updateLastFired(job.name, entry)
-        }
+        // Always record the kill with the current timestamp, even if the
+        // previous result was also "killed". Without this, consecutive kills
+        // leave lastFired stuck at the first kill's timestamp, which breaks
+        // catchup (elapsed computed from a stale timestamp).
+        const entry: LastFiredEntry = { timestamp: new Date().toISOString(), result: "killed" }
+        lastFired[job.name] = entry
+        await updateLastFired(job.name, entry)
         return
       }
       console.error(`[cron] Failed to fire job "${job.name}":`, err)
