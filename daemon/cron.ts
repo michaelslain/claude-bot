@@ -258,8 +258,10 @@ function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   if (!last) return true // never fired — catch up
   const elapsed = Date.now() - new Date(last.timestamp).getTime()
   const interval = getIntervalMs(job.cron)
-  // Missed if more than 1.5x the interval has passed since last fire
-  return elapsed > interval * 1.5
+  // Missed if more than 1.1x the interval has passed since last fire.
+  // Keep this tight (1.1x not 1.5x) — on a laptop that sleeps, a daily
+  // cron at midnight needs to catch up the next morning, not wait 36h.
+  return elapsed > interval * 1.1
 }
 
 const CRON_RESULT_INSTRUCTION = `\n\nIMPORTANT: When you are done, print exactly [CRON_RESULT:SUCCESS] if the task completed successfully, or [CRON_RESULT:FAILURE] if it failed. This must be the last thing you print.`
