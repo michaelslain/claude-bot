@@ -362,11 +362,14 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   const startedAt = Date.now()
   await markRunning(job.name)
 
-  // Snapshot protected directories before running
-  const [cronSnap, procSnap] = await Promise.all([
-    snapshotDir(CRONS_DIR),
-    snapshotDir(PROCESSES_DIR),
-  ])
+  // Guard only the running cron's OWN definition file, not the entire
+  // crons directory. The old approach (snapshotDir of all .md) reverted
+  // legitimate external edits to sibling crons that happened while this
+  // job was running. Self-modification is the real threat.
+  const ownCronFile = join(CRONS_DIR, `${job.name}.md`)
+  let ownCronContent: string | null = null
+  try { ownCronContent = await readFile(ownCronFile, "utf-8") } catch {}
+  const procSnap = await snapshotDir(PROCESSES_DIR)
 
   // Run the actual session in the background (not awaited by caller)
   const sessionPromise = (async () => {
@@ -407,11 +410,23 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
         notify(`claude-bot: ${job.name}`, `Failed: ${err}`)
       }
     } finally {
-      // Restore protected directories if the session modified them
-      await Promise.all([
-        restoreDir(CRONS_DIR, cronSnap, job.name),
-        restoreDir(PROCESSES_DIR, procSnap, job.name),
-      ])
+      // Restore the running cron's own definition if it self-modified.
+      // Other crons + external edits are NOT reverted (previous bug).
+      if (ownCronContent !== null) {
+        try {
+          const current = await readFile(ownCronFile, "utf-8")
+          if (current !== ownCronContent) {
+            console.warn(`[cron] Guard: "${job.name}" modified its own definition — reverting`)
+            await writeFile(ownCronFile, ownCronContent, "utf-8")
+          }
+        } catch {
+          // File deleted by session — restore it
+          console.warn(`[cron] Guard: "${job.name}" deleted its own definition — restoring`)
+          await writeFile(ownCronFile, ownCronContent, "utf-8")
+        }
+      }
+      // Process definitions are still broadly guarded (rarely edited externally)
+      await restoreDir(PROCESSES_DIR, procSnap, job.name)
       jobAbortControllers.delete(job.name)
       await markDone(job.name)
       runningJobs.delete(job.name)
