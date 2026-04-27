@@ -64,7 +64,7 @@ Content with [[backlinks]] to other notes.
 
 ### Automatic Collection
 
-A `UserPromptSubmit` hook (`bin/collect-hook.ts`) runs on every Claude Code session. It saves user prompts as `type: auto` notes in the memory graph. A junk filter skips short messages, slash commands, and code-heavy prompts. Dreaming consolidates these raw notes into proper typed notes.
+A `SessionEnd` hook (`bin/collect-hook.ts`) fires when a Claude Code session closes. It reads the session transcript, extracts all user messages, strips hook-injected blocks (`<system-reminder>`, slash-command artifacts), and saves them as a single `type: auto` note. No content filtering — dreaming handles dedup and quality on consolidation.
 
 ### Dreaming
 
@@ -119,7 +119,7 @@ claude-bot/
     dream.ts          # memory consolidation via bot session
   bin/
     recall-hook.ts    # UserPromptSubmit hook: injects relevant memories into context
-    collect-hook.ts   # UserPromptSubmit hook: saves prompts as auto notes
+    collect-hook.ts   # SessionEnd hook: saves session transcript as auto note
   lib/
     json.ts           # shared JSON parsing, date utils
   skills/

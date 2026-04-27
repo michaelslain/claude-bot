@@ -11,7 +11,7 @@ Long-term graph memory, scheduled tasks, and a background daemon.
 git clone https://github.com/michaelslain/claude-bot.git
 cd claude-bot
 bun install
-claude plugin marketplace add .
+claude plugin marketplace add ./
 claude plugin install claude-bot@claude-bot-local
 ```
 

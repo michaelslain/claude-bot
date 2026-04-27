@@ -696,7 +696,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Ensure hooks are registered in global Claude settings
 interface HookEntry { hooks?: Array<{ type?: string; command?: string }> }
 interface ClaudeSettings {
-  hooks?: { UserPromptSubmit?: HookEntry[] }
+  hooks?: {
+    UserPromptSubmit?: HookEntry[]
+    SessionEnd?: HookEntry[]
+  }
   [key: string]: unknown
 }
 
@@ -711,14 +714,20 @@ try {
 
   if (!settings.hooks) settings.hooks = {}
   if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = []
+  if (!settings.hooks.SessionEnd) settings.hooks.SessionEnd = []
 
   const recallHookCommand = `bun run ${join(import.meta.dir, "bin", "recall-hook.ts")}`
   const collectHookCommand = `bun run ${join(import.meta.dir, "bin", "collect-hook.ts")}`
 
   // Remove any old memory-hook.ts entries (renamed to recall-hook.ts)
+  // Also remove collect-hook from UserPromptSubmit (migrated to SessionEnd)
   for (const entry of settings.hooks.UserPromptSubmit) {
     if (entry.hooks) {
-      entry.hooks = entry.hooks.filter((h) => !h.command?.includes("memory-hook.ts"))
+      entry.hooks = entry.hooks.filter(
+        (h) =>
+          !h.command?.includes("memory-hook.ts") &&
+          !h.command?.includes("collect-hook.ts")
+      )
     }
   }
   // Clean up entries left with empty hooks arrays
@@ -726,7 +735,7 @@ try {
     (entry) => entry.hooks && entry.hooks.length > 0
   )
 
-  // Ensure recall-hook is registered
+  // Ensure recall-hook is registered on UserPromptSubmit
   const hasRecallHook = settings.hooks.UserPromptSubmit.some((entry) =>
     entry.hooks?.some((h) => h.command?.includes("recall-hook.ts"))
   )
@@ -736,12 +745,12 @@ try {
     })
   }
 
-  // Ensure collect-hook is registered
-  const hasCollectHook = settings.hooks.UserPromptSubmit.some((entry) =>
+  // Ensure collect-hook is registered on SessionEnd
+  const hasCollectHook = settings.hooks.SessionEnd.some((entry) =>
     entry.hooks?.some((h) => h.command?.includes("collect-hook.ts"))
   )
   if (!hasCollectHook) {
-    settings.hooks.UserPromptSubmit.push({
+    settings.hooks.SessionEnd.push({
       hooks: [{ type: "command", command: collectHookCommand }],
     })
   }
