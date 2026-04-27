@@ -50,3 +50,19 @@ export const RESTART_BACKOFF_MAX_MS = 60_000
 
 export const LAUNCHD_LABEL = "com.claude-bot.daemon"
 export const SYSTEMD_SERVICE_NAME = "claude-bot"
+
+// ── User config ─────────────────────────────────────────────────────────────
+
+export const CONFIG_FILE = join(BOT_DIR, "config.json")
+
+export interface UserConfig {
+  /** Minimum prompt length (chars) to save as auto note. Default: 100 */
+  minPromptLength?: number
+  /** Max prompt length (chars) for short question filter. Default: 300 */
+  maxShortQuestionLength?: number
+}
+
+export const DEFAULT_USER_CONFIG: Required<UserConfig> = {
+  minPromptLength: 100,
+  maxShortQuestionLength: 300,
+}

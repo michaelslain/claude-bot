@@ -15,6 +15,7 @@ import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
 import { today } from "./lib/json.ts"
 import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
 import { BOT_DIR, LOGS_DIR, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "./lib/config.ts"
+import { loadUserConfig, saveUserConfig } from "./lib/user-config.ts"
 import { homedir } from "os"
 import { join } from "path"
 import { mkdir, readdir, readFile } from "fs/promises"
@@ -207,6 +208,8 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
           "mcp__claude-bot__stop",
           "mcp__claude-bot__uninstall",
           "mcp__claude-bot__status",
+          "mcp__claude-bot__config_get",
+          "mcp__claude-bot__config_set",
           "mcp__claude-bot__cron_list",
           "mcp__claude-bot__cron_create",
           "mcp__claude-bot__cron_run",
@@ -350,6 +353,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "status",
       description: "Get claude-bot daemon status — whether it's running, session ID, uptime, memory note count, cron job count",
       inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "config_get",
+      description: "Get current user configuration settings (min prompt length, etc.)",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "config_set",
+      description: "Update user configuration settings. Changes take effect immediately for hooks.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          minPromptLength: {
+            type: "number",
+            description: "Minimum prompt length (chars) to save as auto note. Default: 100",
+          },
+          maxShortQuestionLength: {
+            type: "number",
+            description: "Max prompt length (chars) for short question filter. Default: 300",
+          },
+        },
+      },
     },
     {
       name: "message_bot",
@@ -541,6 +566,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       updateDreamConfig(config)
       return toResult({ ok: true, ...getDreamConfig() })
+    }
+
+    case "config_get": {
+      const config = await loadUserConfig()
+      return toResult({ ok: true, config })
+    }
+
+    case "config_set": {
+      const updates = args as { minPromptLength?: number; maxShortQuestionLength?: number }
+      await saveUserConfig(updates)
+      const config = await loadUserConfig()
+      return toResult({ ok: true, config })
     }
 
     case "status": {

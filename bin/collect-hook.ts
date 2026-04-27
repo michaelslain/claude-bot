@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { writeNote } from "../memory/graph.ts"
+import { loadUserConfig } from "../lib/user-config.ts"
 
 try {
   const input = await Bun.stdin.text()
@@ -7,10 +8,12 @@ try {
 
   if (!prompt) process.exit(0)
 
+  const config = await loadUserConfig()
+
   // --- Junk filter ---
 
   // Too short to contain meaningful knowledge
-  if (prompt.length < 100) process.exit(0)
+  if (prompt.length < config.minPromptLength) process.exit(0)
 
   // Slash commands
   if (prompt.startsWith("/")) process.exit(0)
@@ -28,9 +31,9 @@ try {
   if (prompt.includes("<system-reminder>")) process.exit(0)
 
   // Questions and short commands — not declarative knowledge
-  // (ends with ? and is under 300 chars, or is clearly imperative)
+  // (ends with ? and is under maxShortQuestionLength, or is clearly imperative)
   const trimmed = prompt.trim()
-  if (trimmed.length < 300 && trimmed.endsWith("?")) process.exit(0)
+  if (trimmed.length < config.maxShortQuestionLength && trimmed.endsWith("?")) process.exit(0)
   if (trimmed.length < 200 && /^(can you|could you|please|just|ok |u can|how about|try |run |kill |restart |stop |check |give |wait )/i.test(trimmed)) process.exit(0)
 
   // Mostly code — check for indentation and code markers

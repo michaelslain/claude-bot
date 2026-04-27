@@ -70,10 +70,29 @@ The default model is `haiku`. You can ask for `opus` or `sonnet` when you need m
 | `dream_status` | Get dreaming config                           |
 | `dream_config` | Update dreaming interval/enabled              |
 | `status`       | Bot status, session ID, note count, cron jobs |
+| `config_get`   | View user configuration settings              |
+| `config_set`   | Update user configuration settings            |
 | `setup`        | First-time install via launchd                |
 | `restart`      | Restart the bot                               |
 | `stop`         | Stop the bot                                  |
 | `uninstall`    | Remove the bot (preserves memory)             |
+
+---
+
+## Configuration
+
+User settings live in `~/.claude-bot/config.json`. Change them at runtime with `config_set` — no restart needed.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `minPromptLength` | `100` | Minimum prompt length (chars) to save as an auto note |
+| `maxShortQuestionLength` | `300` | Max length for the short-question filter — prompts ending in `?` under this length are skipped |
+
+Example:
+
+```
+config_set({ minPromptLength: 50 })
+```
 
 ---
 
@@ -161,6 +180,7 @@ claude-bot/
 ~/.claude-bot/
   CLAUDE.md             Bot personality
   .mcp.json             MCP config
+  config.json           User configuration settings
   session-id            Persistent session ID
   memory/               The graph
   crons/                Cron job definitions
