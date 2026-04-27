@@ -8,36 +8,38 @@ try {
 
   if (!prompt) process.exit(0)
 
+  // Strip <system-reminder> blocks injected by other hooks (e.g. recall-hook)
+  const stripped = prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim()
+
   const config = await loadUserConfig()
 
   // --- Junk filter ---
 
   // Too short to contain meaningful knowledge
-  if (prompt.length < config.minPromptLength) process.exit(0)
+  if (stripped.length < config.minPromptLength) process.exit(0)
 
   // Slash commands
-  if (prompt.startsWith("/")) process.exit(0)
+  if (stripped.startsWith("/")) process.exit(0)
 
   // Cron prompts — already stored in cron files
-  if (prompt.startsWith("[Cron:")) process.exit(0)
+  if (stripped.startsWith("[Cron:")) process.exit(0)
 
   // Task notifications — system plumbing
-  if (prompt.includes("<task-notification>")) process.exit(0)
+  if (stripped.includes("<task-notification>")) process.exit(0)
 
   // Daemon startup prompt
-  if (prompt.includes("You are now running as a background daemon")) process.exit(0)
+  if (stripped.includes("You are now running as a background daemon")) process.exit(0)
 
-  // System/hook XML blocks
-  if (prompt.includes("<system-reminder>")) process.exit(0)
+  // Prompts that are still system/hook XML after stripping known blocks
+  if (stripped.startsWith("<")) process.exit(0)
 
   // Questions and short commands — not declarative knowledge
   // (ends with ? and is under maxShortQuestionLength, or is clearly imperative)
-  const trimmed = prompt.trim()
-  if (trimmed.length < config.maxShortQuestionLength && trimmed.endsWith("?")) process.exit(0)
-  if (trimmed.length < 200 && /^(can you|could you|please|just|ok |u can|how about|try |run |kill |restart |stop |check |give |wait )/i.test(trimmed)) process.exit(0)
+  if (stripped.length < config.maxShortQuestionLength && stripped.endsWith("?")) process.exit(0)
+  if (stripped.length < 200 && /^(can you|could you|please|just|ok |u can|how about|try |run |kill |restart |stop |check |give |wait )/i.test(stripped)) process.exit(0)
 
   // Mostly code — check for indentation and code markers
-  const lines = prompt.split("\n")
+  const lines = stripped.split("\n")
   if (lines.length > 3) {
     const codeLines = lines.filter(
       (l) =>
@@ -66,7 +68,7 @@ try {
       created: now.toISOString().slice(0, 10),
       updated: now.toISOString().slice(0, 10),
     },
-    prompt
+    stripped
   )
 } catch (err) {
   console.error("[collect-hook]", err)
