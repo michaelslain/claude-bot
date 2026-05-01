@@ -29,10 +29,17 @@ export interface CronJob {
   notify: boolean
   model?: string
   effort?: string
-  /** Session timeout in seconds. Default: 300 (5 min). */
+  /** Session timeout in seconds. Default: 300 (5 min). 0 = no timeout. */
   timeout: number
   /** Process pattern to monitor after session ends (matched via pgrep -f). */
   waitFor?: string
+}
+
+function parseTimeoutSecs(raw: string | undefined): number {
+  if (!raw) return DEFAULT_CRON_TIMEOUT
+  if (raw === "none" || raw === "0") return 0 // explicit no-timeout
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CRON_TIMEOUT
 }
 
 function parseCronFrontmatter(name: string, frontmatter: Record<string, string>, body: string): CronJob | null {
@@ -45,14 +52,31 @@ function parseCronFrontmatter(name: string, frontmatter: Record<string, string>,
     schedule,
     cron,
     prompt: body,
-    catchup: frontmatter.catchup === "true",
+    catchup: frontmatter.catchup !== "false",
     enabled: frontmatter.enabled !== "false",
     notify: frontmatter.notify === "true",
     model: frontmatter.model,
     effort: frontmatter.effort,
-    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : DEFAULT_CRON_TIMEOUT,
+    timeout: parseTimeoutSecs(frontmatter.timeout),
     waitFor: frontmatter.waitFor,
   }
+}
+
+// Cron job names become filenames in CRONS_DIR. Reject anything that could
+// escape the directory or produce surprising filesystem entries.
+const CRON_NAME_RE = /^[a-zA-Z0-9_-][a-zA-Z0-9_.\-]*$/
+function validateCronName(name: string): { ok: boolean; error?: string } {
+  if (!name) return { ok: false, error: "Cron name is required" }
+  if (name.length > 100) return { ok: false, error: "Cron name too long (max 100)" }
+  if (!CRON_NAME_RE.test(name)) {
+    return { ok: false, error: `Invalid cron name "${name}" — use only [a-zA-Z0-9_.-], no path separators` }
+  }
+  // Defense-in-depth: confirm the resolved path stays inside CRONS_DIR.
+  const candidate = join(CRONS_DIR, `${name}.md`)
+  if (!candidate.startsWith(CRONS_DIR + "/") && !candidate.startsWith(CRONS_DIR + "\\")) {
+    return { ok: false, error: `Invalid cron name "${name}"` }
+  }
+  return { ok: true }
 }
 
 export function parseCronExpression(expr: string): CronExpression | null {
@@ -252,16 +276,33 @@ function getIntervalMs(cron: CronExpression): number {
   return 60_000
 }
 
-function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>): boolean {
+/**
+ * Catchup cooldown for non-success results (killed/failed). A killed run
+ * means the work didn't complete, so we want to retry — but with a floor
+ * to avoid hot-loops on persistently-broken crons. Scales with interval:
+ * daily → 2h, hourly → 5min, weekly → 14h.
+ */
+function retryCooldownMs(intervalMs: number): number {
+  return Math.max(5 * 60_000, Math.floor(intervalMs / 12))
+}
+
+export function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredEntry>): boolean {
   if (!job.catchup) return false
   const last = lastFired[job.name]
   if (!last) return true // never fired — catch up
   const elapsed = Date.now() - new Date(last.timestamp).getTime()
   const interval = getIntervalMs(job.cron)
-  // Missed if more than 1.01x the interval has passed since last fire.
-  // Tight multiplier because this runs on a laptop that sleeps — a daily
-  // cron at midnight needs to fire on wake, not wait hours. 1.01x for
-  // daily = 24h 14min, so catchup triggers ~14min after the missed window.
+
+  // Killed/failed = the run didn't complete. The user's invariant:
+  // "if a process was killed, that means it didn't run" — so retry sooner
+  // than the next scheduled tick, but with a cooldown to prevent hot loops.
+  if (last.result === "killed" || last.result === "failed") {
+    return elapsed > retryCooldownMs(interval)
+  }
+
+  // Successful (or unknown) runs: missed if more than 1.01x the interval
+  // has passed. Tight multiplier because this runs on a laptop that sleeps —
+  // a daily cron at midnight needs to fire on wake, not wait hours.
   return elapsed > interval * 1.01
 }
 
@@ -381,7 +422,12 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac, timeoutSecs: job.timeout, newSession: true })
 
       if (job.waitFor) {
-        const remainingMs = Math.max(0, job.timeout * 1000 - (Date.now() - startedAt))
+        // timeout: 0 means "no timeout" — wait indefinitely for the launched
+        // process to finish. Number.MAX_SAFE_INTEGER ms ≈ 285k years, effectively
+        // infinite without breaking Date.now() arithmetic in waitForProcessPattern.
+        const remainingMs = job.timeout > 0
+          ? Math.max(0, job.timeout * 1000 - (Date.now() - startedAt))
+          : Number.MAX_SAFE_INTEGER
         if (remainingMs > 0) {
           await waitForProcessPattern(job.waitFor, remainingMs, job.name)
         }
@@ -538,6 +584,7 @@ export async function waitForRunningJobs(timeoutMs: number = 10_000): Promise<vo
 // ── Cron CRUD helpers ────────────────────────────────────────────────────────
 
 async function loadCronJob(name: string): Promise<CronJob | null> {
+  if (!validateCronName(name).ok) return null
   try {
     const content = await readFile(join(CRONS_DIR, `${name}.md`), "utf-8")
     const { frontmatter, body } = parseFrontmatter(content)
@@ -548,6 +595,8 @@ async function loadCronJob(name: string): Promise<CronJob | null> {
 }
 
 export async function runCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
+  const nameCheck = validateCronName(name)
+  if (!nameCheck.ok) return nameCheck
   if (runningJobs.has(name)) return { ok: false, error: `Cron job "${name}" is already running. Call cron_stop first to kill it.` }
 
   const job = await loadCronJob(name)
@@ -563,6 +612,8 @@ export async function runCronJob(name: string): Promise<{ ok: boolean; error?: s
  * Used by the MCP server (separate process) instead of runCronJob directly.
  */
 export async function requestCronRun(name: string): Promise<{ ok: boolean; error?: string }> {
+  const nameCheck = validateCronName(name)
+  if (!nameCheck.ok) return nameCheck
   const job = await loadCronJob(name)
   if (!job) return { ok: false, error: `Cron job "${name}" not found` }
 
@@ -627,9 +678,10 @@ function buildCronFile(opts: { name: string; schedule: string; model?: string; e
   lines.push(`schedule: ${opts.schedule}`)
   if (opts.model) lines.push(`model: ${opts.model}`)
   if (opts.effort) lines.push(`effort: ${opts.effort}`)
-  if (opts.timeout && opts.timeout !== DEFAULT_CRON_TIMEOUT) lines.push(`timeout: ${opts.timeout}`)
+  if (opts.timeout !== undefined && opts.timeout !== DEFAULT_CRON_TIMEOUT) lines.push(`timeout: ${opts.timeout}`)
   if (opts.waitFor) lines.push(`waitFor: ${opts.waitFor}`)
-  if (opts.catchup) lines.push(`catchup: true`)
+  // Default is now true — only emit when explicitly disabled
+  if (opts.catchup === false) lines.push(`catchup: false`)
   if (opts.notify) lines.push(`notify: true`)
   if (opts.enabled === false) lines.push(`enabled: false`)
   lines.push("---")
@@ -640,6 +692,8 @@ function buildCronFile(opts: { name: string; schedule: string; model?: string; e
 }
 
 export async function createCronJob(opts: { name: string; schedule: string; prompt: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+  const nameCheck = validateCronName(opts.name)
+  if (!nameCheck.ok) return nameCheck
   const cron = parseCronExpression(opts.schedule)
   if (!cron) return { ok: false, error: `Invalid cron schedule: "${opts.schedule}"` }
 
@@ -651,6 +705,8 @@ export async function createCronJob(opts: { name: string; schedule: string; prom
 }
 
 export async function deleteCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
+  const nameCheck = validateCronName(name)
+  if (!nameCheck.ok) return nameCheck
   const filePath = join(CRONS_DIR, `${name}.md`)
   try {
     await unlink(filePath)
@@ -661,6 +717,8 @@ export async function deleteCronJob(name: string): Promise<{ ok: boolean; error?
 }
 
 export async function updateCronJob(name: string, updates: { enabled?: boolean; schedule?: string; model?: string; effort?: string; catchup?: boolean; notify?: boolean; waitFor?: string; prompt?: string }): Promise<{ ok: boolean; error?: string }> {
+  const nameCheck = validateCronName(name)
+  if (!nameCheck.ok) return nameCheck
   const filePath = join(CRONS_DIR, `${name}.md`)
   let content: string
   try {
@@ -689,8 +747,8 @@ export async function updateCronJob(name: string, updates: { enabled?: boolean; 
     schedule: frontmatter.schedule!,
     model: frontmatter.model,
     effort: frontmatter.effort,
-    timeout: frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : undefined,
-    catchup: frontmatter.catchup === "true",
+    timeout: frontmatter.timeout !== undefined ? parseTimeoutSecs(frontmatter.timeout) : undefined,
+    catchup: frontmatter.catchup !== "false",
     notify: frontmatter.notify === "true",
     enabled: frontmatter.enabled !== "false",
     waitFor: frontmatter.waitFor,

@@ -1,8 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { writeFile, mkdir, rm } from "fs/promises"
-import { join } from "path"
-import { tmpdir } from "os"
-import { parseCronExpression, shouldFire } from "./cron"
+import { parseCronExpression, shouldFire, shouldCatchUp, type CronJob, type LastFiredEntry } from "./cron"
 import { parseFrontmatter } from "../lib/frontmatter"
 
 describe("parseCronExpression", () => {
@@ -318,7 +315,7 @@ describe("parseFrontmatter (cron file parsing)", () => {
 
     const { frontmatter } = parseFrontmatter(content)
     // These fields are absent — loadCronJobs applies defaults:
-    // catchup: frontmatter.catchup === "true"  => false
+    // catchup: frontmatter.catchup !== "false" => true (opt-out, not opt-in)
     // enabled: frontmatter.enabled !== "false" => true
     // notify:  frontmatter.notify === "true"   => false
     // timeout: DEFAULT_TIMEOUT (300) when frontmatter.timeout is absent
@@ -328,12 +325,12 @@ describe("parseFrontmatter (cron file parsing)", () => {
     expect(frontmatter.timeout).toBeUndefined()
 
     // Simulate the default derivations used in parseCronFrontmatter:
-    const catchup = frontmatter.catchup === "true"
+    const catchup = frontmatter.catchup !== "false"
     const enabled = frontmatter.enabled !== "false"
     const notify  = frontmatter.notify === "true"
     const timeout = frontmatter.timeout ? parseInt(frontmatter.timeout, 10) : 300
 
-    expect(catchup).toBe(false)
+    expect(catchup).toBe(true)
     expect(enabled).toBe(true)
     expect(notify).toBe(false)
     expect(timeout).toBe(300)
@@ -410,5 +407,81 @@ describe("shouldFire pattern frequency", () => {
     expect(shouldFire(cron, new Date("2026-04-14T00:00:00"))).toBe(false)
     expect(shouldFire(cron, new Date("2026-04-16T00:00:00"))).toBe(false)
     expect(shouldFire(cron, new Date("2026-05-15T00:00:00"))).toBe(true)
+  })
+})
+
+// ── shouldCatchUp: kills/failures should still trigger catchup ────────────────
+
+describe("shouldCatchUp", () => {
+  function dailyJob(catchup: boolean): CronJob {
+    return {
+      name: "daily-test",
+      schedule: "13 0 * * *",
+      cron: parseCronExpression("13 0 * * *")!,
+      prompt: "",
+      catchup,
+      enabled: true,
+      notify: false,
+      timeout: 3600,
+    }
+  }
+
+  function entry(secsAgo: number, result: LastFiredEntry["result"]): LastFiredEntry {
+    return { timestamp: new Date(Date.now() - secsAgo * 1000).toISOString(), result }
+  }
+
+  it("returns false when catchup is disabled", () => {
+    const job = dailyJob(false)
+    const fired = { [job.name]: entry(3 * 24 * 3600, "killed") }
+    expect(shouldCatchUp(job, fired)).toBe(false)
+  })
+
+  it("returns true when never fired and catchup enabled", () => {
+    const job = dailyJob(true)
+    expect(shouldCatchUp(job, {})).toBe(true)
+  })
+
+  it("does NOT catch up immediately after a successful run", () => {
+    const job = dailyJob(true)
+    const fired = { [job.name]: entry(60, "success") }
+    expect(shouldCatchUp(job, fired)).toBe(false)
+  })
+
+  it("catches up >24h14min after last successful run (1.01x daily)", () => {
+    const job = dailyJob(true)
+    const fired = { [job.name]: entry(25 * 3600, "success") }
+    expect(shouldCatchUp(job, fired)).toBe(true)
+  })
+
+  // The bug fix: a kill should not block catchup until next scheduled tick.
+  it("catches up after a kill once cooldown passes (daily → 2h)", () => {
+    const job = dailyJob(true)
+    // 5 minutes after kill: still within cooldown
+    expect(shouldCatchUp(job, { [job.name]: entry(5 * 60, "killed") })).toBe(false)
+    // 3 hours after kill: cooldown elapsed (cooldown = 24h/12 = 2h)
+    expect(shouldCatchUp(job, { [job.name]: entry(3 * 3600, "killed") })).toBe(true)
+  })
+
+  it("catches up after a failed run once cooldown passes", () => {
+    const job = dailyJob(true)
+    expect(shouldCatchUp(job, { [job.name]: entry(60, "failed") })).toBe(false)
+    expect(shouldCatchUp(job, { [job.name]: entry(3 * 3600, "failed") })).toBe(true)
+  })
+
+  it("treats unknown result as success (doesn't refire eagerly)", () => {
+    const job = dailyJob(true)
+    expect(shouldCatchUp(job, { [job.name]: entry(60, "unknown") })).toBe(false)
+    // Unknown should still respect the standard 1.01x missed-window rule
+    expect(shouldCatchUp(job, { [job.name]: entry(25 * 3600, "unknown") })).toBe(true)
+  })
+
+  it("hourly cron killed → 5min cooldown (floor)", () => {
+    const job: CronJob = {
+      ...dailyJob(true),
+      schedule: "0 * * * *",
+      cron: parseCronExpression("0 * * * *")!,
+    }
+    expect(shouldCatchUp(job, { [job.name]: entry(60, "killed") })).toBe(false)
+    expect(shouldCatchUp(job, { [job.name]: entry(6 * 60, "killed") })).toBe(true)
   })
 })
