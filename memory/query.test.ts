@@ -437,3 +437,73 @@ describe("executeQuery — edge cases", () => {
     expect(results).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Folder-scoped queries
+// ---------------------------------------------------------------------------
+
+describe("query — folder filter", () => {
+  let tempDir: string;
+
+  const mkFm = (
+    type: NoteFrontmatter["type"],
+    tags: string[]
+  ): NoteFrontmatter => ({
+    type,
+    tags,
+    created: "2026-04-01",
+    updated: "2026-04-08",
+  });
+
+  beforeEach(async () => {
+    tempDir = makeTempDir();
+    await Bun.spawn(["mkdir", "-p", tempDir]).exited;
+
+    // Root notes
+    await writeNote("rootfact", mkFm("fact", ["general"]), "Root content.", tempDir);
+    // moltbook folder
+    await writeNote("voting", mkFm("project", ["moltbook"]), "Voting rules.", tempDir, "moltbook");
+    await writeNote("members", mkFm("project", ["moltbook"]), "Member list.", tempDir, "moltbook");
+    // daily folder
+    await writeNote("apr-08", mkFm("daily", ["log"]), "Today's log.", tempDir, "daily");
+  });
+
+  afterEach(async () => {
+    await Bun.spawn(["rm", "-rf", tempDir]).exited;
+  });
+
+  test("recall with folder filter returns only that folder's notes", async () => {
+    const results = await query("", tempDir, "moltbook");
+    expect(results).toHaveLength(2);
+    const names = results.map((n) => n.name).sort();
+    expect(names).toEqual(["moltbook/members", "moltbook/voting"]);
+  });
+
+  test("recall without folder filter returns all notes", async () => {
+    const results = await query("", tempDir);
+    expect(results).toHaveLength(4);
+    const names = results.map((n) => n.name).sort();
+    expect(names).toEqual(["daily/apr-08", "moltbook/members", "moltbook/voting", "rootfact"]);
+  });
+
+  test("folder filter combines with other filters (AND)", async () => {
+    const results = await query("type:project", tempDir, "moltbook");
+    expect(results).toHaveLength(2);
+  });
+
+  test("folder filter excludes matching notes from other folders", async () => {
+    const results = await query("type:fact", tempDir, "moltbook");
+    expect(results).toEqual([]);
+  });
+
+  test("folder filter on non-existent folder returns empty", async () => {
+    const results = await query("", tempDir, "nope");
+    expect(results).toEqual([]);
+  });
+
+  test("recall results include folder-prefixed names", async () => {
+    const results = await query("voting", tempDir);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.name).toBe("moltbook/voting");
+  });
+});

@@ -9,6 +9,8 @@ import {
   deleteNote,
   findBacklinks,
   loadAllNotes,
+  parseNoteRef,
+  sanitizeFolder,
   type NoteFrontmatter,
 } from "./graph.ts";
 
@@ -465,6 +467,153 @@ describe("MemoryGraph", () => {
     test("deleting a note that does not exist returns false without throwing", async () => {
       const result = await deleteNote("AbsolutelyDoesNotExist", tempDir);
       expect(result).toBe(false);
+    });
+  });
+
+  // ─── Folder support ────────────────────────────────────────────────────────
+
+  describe("folder support", () => {
+    const fm: NoteFrontmatter = {
+      type: "fact",
+      tags: [],
+      created: "2026-04-08",
+      updated: "2026-04-08",
+    };
+
+    test("parseNoteRef splits folder-prefixed and bare references", () => {
+      expect(parseNoteRef("foo")).toEqual({ name: "foo" });
+      expect(parseNoteRef("moltbook/foo")).toEqual({ folder: "moltbook", name: "foo" });
+      expect(parseNoteRef("moltbook/foo.md")).toEqual({ folder: "moltbook", name: "foo" });
+      expect(parseNoteRef("/foo")).toEqual({ name: "foo" });
+    });
+
+    test("sanitizeFolder rejects unsafe input and accepts simple names", () => {
+      expect(sanitizeFolder()).toBe("");
+      expect(sanitizeFolder("")).toBe("");
+      expect(sanitizeFolder("..")).toBe("");
+      expect(sanitizeFolder("moltbook")).toBe("moltbook");
+      expect(sanitizeFolder("daily-notes")).toBe("daily-notes");
+      expect(sanitizeFolder("foo/bar")).toBe("foo-bar");
+    });
+
+    test("writeNote and readNote round-trip a folder note", async () => {
+      await writeNote("voting-standards", fm, "Voting rules.", tempDir, "moltbook");
+      const note = await readNote("voting-standards", tempDir, "moltbook");
+      expect(note).not.toBeNull();
+      expect(note!.name).toBe("moltbook/voting-standards");
+      expect(note!.content).toContain("Voting rules.");
+    });
+
+    test("readNote accepts folder-prefixed name without folder param", async () => {
+      await writeNote("voting-standards", fm, "Voting rules.", tempDir, "moltbook");
+      const note = await readNote("moltbook/voting-standards", tempDir);
+      expect(note).not.toBeNull();
+      expect(note!.name).toBe("moltbook/voting-standards");
+    });
+
+    test("deleteNote with folder", async () => {
+      await writeNote("v1", fm, "x", tempDir, "moltbook");
+      const deleted = await deleteNote("v1", tempDir, "moltbook");
+      expect(deleted).toBe(true);
+      const gone = await readNote("v1", tempDir, "moltbook");
+      expect(gone).toBeNull();
+    });
+
+    test("deleteNote accepts folder-prefixed name without folder param", async () => {
+      await writeNote("v1", fm, "x", tempDir, "moltbook");
+      const deleted = await deleteNote("moltbook/v1", tempDir);
+      expect(deleted).toBe(true);
+    });
+
+    test("listNotes scoped to a folder returns folder-prefixed names", async () => {
+      await writeNote("rootnote", fm, "root", tempDir);
+      await writeNote("a", fm, "a", tempDir, "moltbook");
+      await writeNote("b", fm, "b", tempDir, "moltbook");
+      const scoped = await listNotes(tempDir, "moltbook");
+      expect(scoped.sort()).toEqual(["moltbook/a", "moltbook/b"]);
+    });
+
+    test("listNotes without folder returns root + folder-prefixed names", async () => {
+      await writeNote("rootnote", fm, "root", tempDir);
+      await writeNote("a", fm, "a", tempDir, "moltbook");
+      await writeNote("b", fm, "b", tempDir, "daily");
+      const all = await listNotes(tempDir);
+      expect(all.sort()).toEqual(["daily/b", "moltbook/a", "rootnote"]);
+    });
+
+    test("listNotes with non-existent folder returns empty array", async () => {
+      const result = await listNotes(tempDir, "nope");
+      expect(result).toEqual([]);
+    });
+
+    test("loadAllNotes scoped to folder returns only that folder's notes", async () => {
+      await writeNote("rootnote", fm, "root content", tempDir);
+      await writeNote("a", fm, "moltbook a", tempDir, "moltbook");
+      await writeNote("b", fm, "moltbook b", tempDir, "moltbook");
+      const scoped = await loadAllNotes(tempDir, "moltbook");
+      expect(scoped).toHaveLength(2);
+      const names = scoped.map((n) => n.name).sort();
+      expect(names).toEqual(["moltbook/a", "moltbook/b"]);
+    });
+
+    test("loadAllNotes recursive returns all notes with proper prefixes", async () => {
+      await writeNote("rootnote", fm, "root content", tempDir);
+      await writeNote("a", fm, "moltbook a", tempDir, "moltbook");
+      const all = await loadAllNotes(tempDir);
+      const byName = Object.fromEntries(all.map((n) => [n.name, n]));
+      expect(byName["rootnote"]).toBeDefined();
+      expect(byName["moltbook/a"]).toBeDefined();
+    });
+
+    test("path traversal is still blocked with folder set", async () => {
+      // Folder that fully sanitizes to "" must throw
+      await expect(
+        async () => await writeNote("foo", fm, "bad", tempDir, "..")
+      ).toThrow();
+      // Folder with traversal-prefix sanitizes safely; file must land inside tempDir
+      await writeNote("foo", fm, "sanitized", tempDir, "../escape");
+      const escaped = await Bun.file(join(tempDir, "..", "foo.md")).exists();
+      expect(escaped).toBe(false);
+      const note = await readNote("foo", tempDir, "../escape");
+      expect(note).not.toBeNull();
+      expect(note!.content).toContain("sanitized");
+    });
+
+    test("backlinks resolve across folders by bare name", async () => {
+      await writeNote("alice", fm, "Alice profile.", tempDir, "people");
+      await writeNote(
+        "intro",
+        fm,
+        "Welcome, see [[alice]] for details.",
+        tempDir,
+        "moltbook"
+      );
+      await writeNote("notes", fm, "Refer to [[alice]].", tempDir);
+      const backlinks = await findBacklinks("alice", tempDir);
+      expect(backlinks.sort()).toEqual(["moltbook/intro", "notes"]);
+    });
+
+    test("findBacklinks accepts folder-prefixed target", async () => {
+      await writeNote("alice", fm, "Alice profile.", tempDir, "people");
+      await writeNote("intro", fm, "See [[alice]].", tempDir);
+      const backlinks = await findBacklinks("people/alice", tempDir);
+      expect(backlinks).toEqual(["intro"]);
+    });
+
+    test("writing the same name in different folders creates distinct notes", async () => {
+      await writeNote("foo", fm, "moltbook foo", tempDir, "moltbook");
+      await writeNote("foo", fm, "daily foo", tempDir, "daily");
+      const m = await readNote("foo", tempDir, "moltbook");
+      const d = await readNote("foo", tempDir, "daily");
+      expect(m!.content).toContain("moltbook foo");
+      expect(d!.content).toContain("daily foo");
+    });
+
+    test("readNote with explicit folder overrides any prefix in name", async () => {
+      await writeNote("foo", fm, "in moltbook", tempDir, "moltbook");
+      // Explicit folder param wins; "name" used as-is (no slashes inside)
+      const note = await readNote("foo", tempDir, "moltbook");
+      expect(note!.content).toContain("in moltbook");
     });
   });
 });

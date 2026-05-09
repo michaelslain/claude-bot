@@ -1,5 +1,5 @@
-import { loadAllNotes, readNote, writeNote, deleteNote, getMemoryDir } from "./graph.ts"
-import type { NoteType } from "./graph.ts"
+import { loadAllNotes, readNote, writeNote, deleteNote, getMemoryDir, parseNoteRef } from "./graph.ts"
+import type { MemoryNote, NoteType } from "./graph.ts"
 import { sendMessage } from "../daemon/session.ts"
 import { parseJsonResponse } from "../lib/json.ts"
 import { today } from "../lib/json.ts"
@@ -89,8 +89,24 @@ function parseDreamResult(response: string): DreamResult | null {
 }
 
 /**
+ * Group notes by folder. Root notes live under the empty-string key.
+ * Folders are treated as semantic boundaries — consolidation never crosses them.
+ */
+function groupByFolder(notes: MemoryNote[]): Map<string, MemoryNote[]> {
+  const groups = new Map<string, MemoryNote[]>()
+  for (const note of notes) {
+    const { folder = "" } = parseNoteRef(note.name)
+    const key = folder
+    const arr = groups.get(key)
+    if (arr) arr.push(note)
+    else groups.set(key, [note])
+  }
+  return groups
+}
+
+/**
  * Run one dream cycle — consolidate, deduplicate, and improve memory notes.
- * Processes notes in batches to avoid overwhelming the LLM context.
+ * Processes notes in batches per folder; folders never merge into each other.
  */
 export async function dream(
   dir: string = getMemoryDir()
@@ -103,90 +119,100 @@ export async function dream(
   let totalImproved = 0
   let totalDeleted = 0
 
-  for (let i = 0; i < notes.length; i += BATCH_SIZE) {
-    const batch = notes.slice(i, i + BATCH_SIZE)
-    const notesJson = JSON.stringify(
-      batch.map((n) => ({
-        name: n.name,
-        type: n.frontmatter.type,
-        tags: n.frontmatter.tags,
-        created: n.frontmatter.created,
-        updated: n.frontmatter.updated,
-        content: n.content,
-        backlinks: n.backlinks,
-      })),
-      null,
-      2
-    )
+  const groups = groupByFolder(notes)
 
-    let response: string
-    try {
-      response = await dispatch(CONSOLIDATION_PROMPT + `\n\nToday's date: ${today()}\n\n` + notesJson)
-    } catch (err) {
-      console.error(`[dream] Failed to dispatch batch ${i / BATCH_SIZE + 1}:`, err)
-      continue
-    }
+  for (const [folder, folderNotes] of groups) {
+    if (folderNotes.length < 2) continue
+    const folderArg = folder || undefined
 
-    const result = parseDreamResult(response)
-    if (!result) continue
-
-    const date = today()
-
-    for (const merge of result.merge) {
-      if (!merge.keep || !merge.updatedContent) continue
-
-      // Collect names to delete, skipping the keep target
-      const toDelete = (merge.delete ?? []).filter((name) => name && name !== merge.keep)
-
-      // Guard: skip this merge if any delete target was already deleted by a prior merge
-      const allExist = await Promise.all(
-        toDelete.map(async (name) => {
-          const note = await readNote(name, dir)
-          return note !== null
-        })
+    for (let i = 0; i < folderNotes.length; i += BATCH_SIZE) {
+      const batch = folderNotes.slice(i, i + BATCH_SIZE)
+      // Send bare names to the LLM — it operates within a single folder context
+      const notesJson = JSON.stringify(
+        batch.map((n) => ({
+          name: parseNoteRef(n.name).name,
+          type: n.frontmatter.type,
+          tags: n.frontmatter.tags,
+          created: n.frontmatter.created,
+          updated: n.frontmatter.updated,
+          content: n.content,
+          backlinks: n.backlinks,
+        })),
+        null,
+        2
       )
-      if (allExist.some((exists) => !exists)) continue
 
-      for (const name of toDelete) {
-        await deleteNote(name, dir)
+      let response: string
+      try {
+        response = await dispatch(CONSOLIDATION_PROMPT + `\n\nToday's date: ${today()}\n\n` + notesJson)
+      } catch (err) {
+        console.error(`[dream] Failed to dispatch folder=${folder || "<root>"} batch ${i / BATCH_SIZE + 1}:`, err)
+        continue
       }
 
-      const existing = batch.find((n) => n.name === merge.keep)
-      await writeNote(
-        merge.keep,
-        {
-          type: merge.updatedType ?? existing?.frontmatter.type ?? "fact",
-          tags: merge.updatedTags ?? existing?.frontmatter.tags ?? [],
-          created: existing?.frontmatter.created ?? date,
-          updated: date,
-        },
-        merge.updatedContent,
-        dir
-      )
-      totalMerged++
-    }
+      const result = parseDreamResult(response)
+      if (!result) continue
 
-    for (const imp of result.improve) {
-      if (!imp.name || !imp.updatedContent) continue
-      const existing = batch.find((n) => n.name === imp.name)
-      if (!existing) continue
-      await writeNote(
-        imp.name,
-        {
-          ...existing.frontmatter,
-          tags: imp.updatedTags ?? existing.frontmatter.tags,
-          updated: date,
-        },
-        imp.updatedContent,
-        dir
-      )
-      totalImproved++
-    }
+      const date = today()
 
-    for (const name of result.delete) {
-      if (name) {
-        await deleteNote(name, dir)
-        totalDeleted++
+      for (const merge of result.merge) {
+        if (!merge.keep || !merge.updatedContent) continue
+
+        const { name: keepName } = parseNoteRef(merge.keep)
+        const toDelete = (merge.delete ?? [])
+          .map((n) => (n ? parseNoteRef(n).name : ""))
+          .filter((name) => name && name !== keepName)
+
+        let deleteFailed = false
+        for (const name of toDelete) {
+          const removed = await deleteNote(name, dir, folderArg)
+          if (!removed) {
+            deleteFailed = true
+            break
+          }
+        }
+        if (deleteFailed) continue
+
+        const existing = batch.find((n) => parseNoteRef(n.name).name === keepName)
+        await writeNote(
+          keepName,
+          {
+            type: merge.updatedType ?? existing?.frontmatter.type ?? "fact",
+            tags: merge.updatedTags ?? existing?.frontmatter.tags ?? [],
+            created: existing?.frontmatter.created ?? date,
+            updated: date,
+          },
+          merge.updatedContent,
+          dir,
+          folderArg
+        )
+        totalMerged++
+      }
+
+      for (const imp of result.improve) {
+        if (!imp.name || !imp.updatedContent) continue
+        const { name: impName } = parseNoteRef(imp.name)
+        const existing = batch.find((n) => parseNoteRef(n.name).name === impName)
+        if (!existing) continue
+        await writeNote(
+          impName,
+          {
+            ...existing.frontmatter,
+            tags: imp.updatedTags ?? existing.frontmatter.tags,
+            updated: date,
+          },
+          imp.updatedContent,
+          dir,
+          folderArg
+        )
+        totalImproved++
+      }
+
+      for (const name of result.delete) {
+        if (!name) continue
+        const { name: bare } = parseNoteRef(name)
+        const removed = await deleteNote(bare, dir, folderArg)
+        if (removed) totalDeleted++
       }
     }
   }

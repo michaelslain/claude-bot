@@ -8,11 +8,11 @@ import {
 import { sendMessage, getSessionId } from "./daemon/session.ts"
 import { loadCronJobs, loadLastFired, loadRunning, requestCronRun, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
 import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
-import { writeNote, deleteNote, listNotes, readNote } from "./memory/graph.ts"
+import { writeNote, deleteNote, listNotes, readNote, parseNoteRef } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
-import { today } from "./lib/json.ts"
+import { today, validateFolder } from "./lib/json.ts"
 import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
 import { BOT_DIR, LOGS_DIR, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "./lib/config.ts"
 import { homedir } from "os"
@@ -290,17 +290,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Markdown content of the note (can include [[backlinks]])",
           },
+          folder: {
+            type: "string",
+            description: "Optional. Single-level subfolder (e.g. 'moltbook'). Alphanumeric, dash, or underscore only. Omit for root.",
+          },
         },
         required: ["name", "content"],
       },
     },
     {
       name: "forget",
-      description: "Remove a note from the memory graph",
+      description: "Remove a note from the memory graph. Accepts folder-prefixed names (e.g. 'moltbook/foo').",
       inputSchema: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Name of the note to forget" },
+          name: { type: "string", description: "Name of the note to forget (may be folder-prefixed, e.g. 'moltbook/foo')" },
         },
         required: ["name"],
       },
@@ -316,6 +320,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description:
               "Query string, e.g. 'type:person tag:active' or 'auth module'",
+          },
+          folder: {
+            type: "string",
+            description: "Optional. Restrict results to a single subfolder (e.g. 'moltbook'). Omit to search all folders and root.",
           },
         },
         required: ["query"],
@@ -493,14 +501,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "remember": {
-      const { name: noteName, type, tags, content } = args as {
+      const { name: noteName, type, tags, content, folder } = args as {
         name: string
         type?: string
         tags?: string[]
         content: string
+        folder?: string
       }
+      const folderCheck = validateFolder(folder)
+      if (!folderCheck.valid) {
+        return toResult({ ok: false, error: folderCheck.error })
+      }
+      const cleanFolder = folder || undefined
       const date = today()
-      const existing = await readNote(noteName)
+      const existing = await readNote(noteName, undefined, cleanFolder)
       await writeNote(
         noteName,
         {
@@ -509,20 +523,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           created: existing?.frontmatter.created ?? date,
           updated: date,
         },
-        content
+        content,
+        undefined,
+        cleanFolder
       )
-      return toResult({ ok: true, name: noteName })
+      const returnedName = cleanFolder ? `${cleanFolder}/${noteName}` : noteName
+      return toResult({ ok: true, name: returnedName })
     }
 
     case "forget": {
       const { name: noteName } = args as { name: string }
-      const deleted = await deleteNote(noteName)
+      const ref = parseNoteRef(noteName)
+      const deleted = await deleteNote(ref.name, undefined, ref.folder)
       return toResult({ ok: deleted, name: noteName })
     }
 
     case "recall": {
-      const { query: queryString } = args as { query: string }
-      const results = await query(queryString)
+      const { query: queryString, folder } = args as { query: string; folder?: string }
+      const folderCheck = validateFolder(folder)
+      if (!folderCheck.valid) {
+        return toResult({ ok: false, error: folderCheck.error })
+      }
+      const results = await query(queryString, undefined, folder || undefined)
       return toResult({ ok: true, count: results.length, notes: results })
     }
 

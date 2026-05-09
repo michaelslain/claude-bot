@@ -62,6 +62,40 @@ updated: 2026-04-08
 Content with [[backlinks]] to other notes.
 ```
 
+### Organizing with Folders
+
+Notes can be organized into optional single-level folders (e.g. `projects/`, `daily/`, `team/`) to group related information. Folders use the `folder` parameter in `remember()` and `recall()`:
+
+```
+remember({
+  name: "voting-standards",
+  type: "fact",
+  tags: ["moltbook"],
+  content: "Voting rules for decision-making...",
+  folder: "moltbook"  # optional, single-level only
+})
+```
+
+**Folder rules:**
+- Single-level only (no nesting: `moltbook/sub/deep` becomes `moltbook-sub-deep`)
+- Alphanumeric, dash, underscore only (`[a-zA-Z0-9_-]+`)
+- Omit folder for root-level notes
+- Folder-prefixed names: `moltbook/voting-standards` (returned by list/load operations)
+
+**Folder usage patterns:**
+- By project: `projects/auth`, `projects/api`
+- By domain: `team/alice`, `team/bob`, `infrastructure/kubernetes`
+- By time: `daily/`, `archive/`
+- By topic: `books/`, `research/`, `conferences/`
+
+**Searching folders:**
+```
+recall({ query: "type:project tag:active", folder: "projects" })  # search 'projects' only
+recall({ query: "tag:active" })  # search all folders and root
+```
+
+**Important:** Backlinks are folder-agnostic. A note in `projects/auth` can link to `[[database-design]]` in `infrastructure/` — the link resolves by bare name across all folders.
+
 ### Automatic Collection
 
 A `SessionEnd` hook (`bin/collect-hook.ts`) fires when a Claude Code session closes. It reads the session transcript, extracts all user messages, strips hook-injected blocks (`<system-reminder>`, slash-command artifacts), and saves them as a single `type: auto` note. No content filtering — dreaming handles dedup and quality on consolidation.
@@ -69,6 +103,8 @@ A `SessionEnd` hook (`bin/collect-hook.ts`) fires when a Claude Code session clo
 ### Dreaming
 
 Memory consolidation uses `sendMessage()` to ask the bot to review notes in batches. Merges duplicates, improves content, processes `auto` notes (extracts value or deletes), removes stale entries. Runs as a cron job (default: every hour) and can be triggered manually via `dream_run`.
+
+**Folder isolation:** Folders are treated as semantic boundaries during consolidation. Notes never merge across folders — `moltbook/foo` and `projects/foo` remain separate even if similar. This keeps domain-specific knowledge isolated while allowing cross-folder backlinks.
 
 ## Cron Jobs
 

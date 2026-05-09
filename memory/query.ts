@@ -135,12 +135,14 @@ function noteMatchesQuery(note: MemoryNote, query: ParsedQuery): boolean {
 /**
  * Execute a parsed query against the memory graph directory.
  * Loads all notes and applies all filters (AND semantics within each filter type).
+ * When `folder` is supplied, only notes from that folder are considered.
  */
 export async function executeQuery(
   query: ParsedQuery,
-  dir: string = getMemoryDir()
+  dir: string = getMemoryDir(),
+  folder?: string
 ): Promise<MemoryNote[]> {
-  const notes = await loadAllNotes(dir);
+  const notes = await loadAllNotes(dir, folder);
   return notes.filter((note) => noteMatchesQuery(note, query));
 }
 
@@ -149,7 +151,8 @@ export async function executeQuery(
  */
 export async function query(
   queryString: string,
-  dir: string = getMemoryDir()
+  dir: string = getMemoryDir(),
+  folder?: string
 ): Promise<MemoryNote[]> {
-  return executeQuery(parseQuery(queryString), dir);
+  return executeQuery(parseQuery(queryString), dir, folder);
 }
