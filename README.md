@@ -231,20 +231,42 @@ During consolidation, stale, isolated notes (old dates + no backlinks) are candi
 │   └── ...
 └── logs/                     # Daemon stdout/stderr
 
-src/
-├── server.ts                 # MCP server
+claude-bot/ (project repo)
+├── server.ts                 # MCP server (memory, cron, dream, setup tools)
+├── package.json
+├── tsconfig.json
+├── .mcp.json
+├── README.md
+├── CLAUDE.md
 ├── daemon/
-│   ├── index.ts              # Daemon entry point
-│   ├── session.ts            # Agent SDK session wrapper
-│   ├── cron.ts               # Cron scheduler
-│   └── process.ts            # Background process manager
+│   ├── index.ts              # Daemon entry point (session init, cron start)
+│   ├── session.ts            # Agent SDK session wrapper (create, resume, send)
+│   ├── cron.ts               # File-based cron scheduler
+│   ├── cron.test.ts          # Cron scheduler tests
+│   ├── process.ts            # Background process manager
+│   └── process.test.ts       # Process manager tests
 ├── memory/
-│   ├── graph.ts              # Note CRUD + folder support
-│   ├── query.ts              # Query parser/executor
-│   ├── search.ts             # Keyword scoring
-│   └── dream.ts              # Memory consolidation
-└── lib/
-    └── config.ts             # Configuration
+│   ├── graph.ts              # Note CRUD, frontmatter, backlinks, folder support
+│   ├── graph.test.ts         # Graph tests
+│   ├── query.ts              # Query parser and executor
+│   ├── query.test.ts         # Query tests
+│   ├── search.ts             # Keyword scoring and search
+│   ├── search.test.ts        # Search tests
+│   └── dream.ts              # Memory consolidation via bot session
+├── bin/
+│   ├── recall-hook.ts        # UserPromptSubmit hook: injects memories into context
+│   └── collect-hook.ts       # SessionEnd hook: saves session transcript as auto note
+├── lib/
+│   ├── config.ts             # Configuration and defaults
+│   ├── config.test.ts        # Config tests
+│   ├── json.ts               # Shared JSON parsing, date utils
+│   ├── platform.ts           # OS-specific utilities (launchd/systemd)
+│   └── frontmatter.ts        # YAML frontmatter parsing
+├── skills/
+│   └── setup/SKILL.md        # Interactive setup skill
+└── .claude-plugin/
+    ├── plugin.json           # Plugin metadata
+    └── marketplace.json      # Marketplace configuration
 ```
 
 ---

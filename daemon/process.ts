@@ -21,6 +21,7 @@ export interface ProcessInfo {
   name: string
   pid: number | null
   running: boolean
+  enabled: boolean
   restart: string
   restarts: number
 }
@@ -44,10 +45,29 @@ function parseEnv(raw: string | undefined): Record<string, string> {
   return {}
 }
 
-export async function loadProcessDefs(): Promise<ProcessDef[]> {
+function parseProcessFrontmatter(name: string, frontmatter: Record<string, string>): ProcessDef | null {
+  const command = frontmatter.command
+  if (!command) return null
+
+  const args = parseArgs(frontmatter.args)
+  const cwd = frontmatter.cwd ?? homedir()
+  const env = parseEnv(frontmatter.env)
+  const restart = (frontmatter.restart ?? "on-failure") as ProcessDef["restart"]
+  const restartDelay = parseInt(frontmatter.restartDelay ?? "1000", 10)
+  const enabled = frontmatter.enabled !== "false"
+
+  return { name: frontmatter.name ?? name, command, args, cwd, env, restart, restartDelay, enabled }
+}
+
+/**
+ * Load all process definitions from disk. Returns ALL defs including disabled
+ * ones — callers decide what to do with `enabled`. (Boot path skips spawning
+ * disabled entries; runtime API still registers them so process_start works.)
+ */
+export async function loadProcessDefs(dir: string = PROCESSES_DIR): Promise<ProcessDef[]> {
   let files: string[]
   try {
-    files = await readdir(PROCESSES_DIR)
+    files = await readdir(dir)
   } catch {
     return []
   }
@@ -56,26 +76,31 @@ export async function loadProcessDefs(): Promise<ProcessDef[]> {
   for (const file of files) {
     if (!file.endsWith(".md")) continue
     try {
-      const content = await readFile(join(PROCESSES_DIR, file), "utf-8")
+      const content = await readFile(join(dir, file), "utf-8")
       const { frontmatter } = parseFrontmatter(content)
-
-      const name = frontmatter.name ?? file.replace(/\.md$/, "")
-      const command = frontmatter.command
-      if (!command) continue
-
-      const args = parseArgs(frontmatter.args)
-      const cwd = frontmatter.cwd ?? homedir()
-      const env = parseEnv(frontmatter.env)
-      const restart = (frontmatter.restart ?? "on-failure") as ProcessDef["restart"]
-      const restartDelay = parseInt(frontmatter.restartDelay ?? "1000", 10)
-      const enabled = frontmatter.enabled !== "false"
-
-      defs.push({ name, command, args, cwd, env, restart, restartDelay, enabled })
+      const def = parseProcessFrontmatter(file.replace(/\.md$/, ""), frontmatter)
+      if (def) defs.push(def)
     } catch {
       // skip unreadable files
     }
   }
   return defs
+}
+
+/**
+ * Rewrite a process .md file with updated frontmatter. Preserves the body and
+ * the original frontmatter field ordering (parseFrontmatter returns the keys
+ * in insertion order). Used by enable/disable to flip the `enabled` flag.
+ */
+async function writeProcessFile(filePath: string, frontmatter: Record<string, string>, body: string): Promise<void> {
+  const lines = ["---"]
+  for (const [key, value] of Object.entries(frontmatter)) {
+    lines.push(`${key}: ${value}`)
+  }
+  lines.push("---")
+  lines.push("")
+  if (body) lines.push(body)
+  await Bun.write(filePath, lines.join("\n") + "\n")
 }
 
 interface ManagedProcess {
@@ -172,22 +197,33 @@ function spawnProcess(mp: ManagedProcess): void {
   })
 }
 
-export async function startProcesses(): Promise<void> {
-  const defs = await loadProcessDefs()
-  for (const def of defs) {
-    if (!def.enabled) continue
-    if (managed.has(def.name)) continue
+function registerDef(def: ProcessDef): ManagedProcess {
+  const existing = managed.get(def.name)
+  if (existing) {
+    existing.def = def
+    return existing
+  }
+  const mp: ManagedProcess = {
+    def,
+    proc: null,
+    restarts: 0,
+    lastStart: 0,
+    backoff: def.restartDelay,
+    stopping: false,
+  }
+  managed.set(def.name, mp)
+  return mp
+}
 
-    const mp: ManagedProcess = {
-      def,
-      proc: null,
-      restarts: 0,
-      lastStart: 0,
-      backoff: def.restartDelay,
-      stopping: false,
-    }
-    managed.set(def.name, mp)
-    spawnProcess(mp)
+export async function startProcesses(dir: string = PROCESSES_DIR): Promise<void> {
+  const defs = await loadProcessDefs(dir)
+  for (const def of defs) {
+    const wasRegistered = managed.has(def.name)
+    const mp = registerDef(def)
+    // Only auto-spawn if enabled. Disabled defs sit in `managed` ready for
+    // a runtime process_start; re-running startProcesses doesn't relaunch
+    // already-running children.
+    if (def.enabled && !wasRegistered) spawnProcess(mp)
   }
 }
 
@@ -250,7 +286,69 @@ export function listProcesses(): ProcessInfo[] {
     name: mp.def.name,
     pid: mp.proc?.pid ?? null,
     running: mp.proc !== null,
+    enabled: mp.def.enabled,
     restart: mp.def.restart,
     restarts: mp.restarts,
   }))
+}
+
+/**
+ * Flip `enabled: true` on disk and register the process if not already known
+ * to the daemon. Does NOT spawn — caller must call startProcess to actually
+ * run it. Idempotent: succeeds even if already enabled.
+ */
+export async function enableProcess(name: string, dir: string = PROCESSES_DIR): Promise<{ ok: boolean; error?: string }> {
+  const filePath = join(dir, `${name}.md`)
+  let content: string
+  try {
+    content = await readFile(filePath, "utf-8")
+  } catch {
+    return { ok: false, error: `No process definition found for "${name}"` }
+  }
+
+  const { frontmatter, body } = parseFrontmatter(content)
+  const def = parseProcessFrontmatter(name, frontmatter)
+  if (!def) return { ok: false, error: `Process "${name}" is missing required "command" field` }
+
+  const isEnabled = frontmatter.enabled === "true"
+  if (!isEnabled) {
+    frontmatter.enabled = "true"
+    await writeProcessFile(filePath, frontmatter, body)
+  }
+
+  registerDef({ ...def, enabled: true })
+  return { ok: true }
+}
+
+/**
+ * Flip `enabled: false` on disk. If the process is currently running, stop it
+ * first. Keeps the entry in `managed` so process_start still works at runtime.
+ * Idempotent: succeeds even if already disabled.
+ */
+export async function disableProcess(name: string, dir: string = PROCESSES_DIR): Promise<{ ok: boolean; error?: string }> {
+  const filePath = join(dir, `${name}.md`)
+  let content: string
+  try {
+    content = await readFile(filePath, "utf-8")
+  } catch {
+    return { ok: false, error: `No process definition found for "${name}"` }
+  }
+
+  const { frontmatter, body } = parseFrontmatter(content)
+  const def = parseProcessFrontmatter(name, frontmatter)
+  if (!def) return { ok: false, error: `Process "${name}" is missing required "command" field` }
+
+  // Stop first if running. stopProcess only works for entries in `managed`,
+  // so register the def before stopping (no-op if already registered).
+  registerDef({ ...def, enabled: false })
+  const mp = managed.get(name)
+  if (mp?.proc) stopProcess(name)
+
+  const isDisabled = frontmatter.enabled === "false"
+  if (!isDisabled) {
+    frontmatter.enabled = "false"
+    await writeProcessFile(filePath, frontmatter, body)
+  }
+
+  return { ok: true }
 }

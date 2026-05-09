@@ -37,6 +37,11 @@ All config lives in `lib/config.ts` — paths, timeouts, intervals, service name
 | `cron_run` | Trigger a cron job immediately |
 | `cron_update` | Update a cron job (enable/disable, schedule, etc.) |
 | `cron_delete` | Delete a cron job |
+| `process_list` | List all background processes with status |
+| `process_start` | Start a background process |
+| `process_stop` | Stop a background process |
+| `process_enable` | Mark a process as enabled (auto-start on daemon boot) |
+| `process_disable` | Mark a process as disabled (no auto-start) |
 | `message_bot` | Send a message to the persistent bot session |
 | `dream_run` | Trigger memory consolidation |
 | `dream_status` | Get dreaming config |
@@ -141,27 +146,39 @@ Standard 5-field cron expressions. The daemon checks every 60 seconds and fires 
 
 ```
 claude-bot/
-  server.ts          # MCP server (memory, dream, message_bot, setup)
+  server.ts                  # MCP server (memory, dream, message_bot, setup)
+  package.json               # Bun dependencies and scripts
+  tsconfig.json              # TypeScript configuration
+  .mcp.json                  # MCP server config
   daemon/
-    index.ts          # daemon entry point (session init, cron start)
-    session.ts        # agent SDK session wrapper (create, resume, send)
-    cron.ts           # file-based cron scheduler
-    cron.test.ts      # cron tests
+    index.ts                 # daemon entry point (session init, cron start)
+    session.ts               # agent SDK session wrapper (create, resume, send)
+    cron.ts                  # file-based cron scheduler
+    cron.test.ts             # cron scheduler tests
+    process.ts               # background process manager
+    process.test.ts          # process manager tests
   memory/
-    graph.ts          # note CRUD, frontmatter, backlinks
-    graph.test.ts     # tests
-    query.ts          # query parser and executor
-    query.test.ts     # tests
-    dream.ts          # memory consolidation via bot session
+    graph.ts                 # note CRUD, frontmatter, backlinks, folder support
+    graph.test.ts            # graph tests
+    query.ts                 # query parser and executor
+    query.test.ts            # query tests
+    search.ts                # keyword scoring and search
+    search.test.ts           # search tests
+    dream.ts                 # memory consolidation via bot session
   bin/
-    recall-hook.ts    # UserPromptSubmit hook: injects relevant memories into context
-    collect-hook.ts   # SessionEnd hook: saves session transcript as auto note
+    recall-hook.ts           # UserPromptSubmit hook: injects relevant memories into context
+    collect-hook.ts          # SessionEnd hook: saves session transcript as auto note
   lib/
-    json.ts           # shared JSON parsing, date utils
+    config.ts                # configuration and defaults
+    config.test.ts           # config tests
+    json.ts                  # shared JSON parsing, date utils
+    platform.ts              # OS-specific utilities (launchd/systemd)
+    frontmatter.ts           # YAML frontmatter parsing
   skills/
-    setup/SKILL.md    # interactive setup skill
-  package.json
-  tsconfig.json
+    setup/SKILL.md           # interactive setup skill
+  .claude-plugin/
+    plugin.json              # plugin metadata
+    marketplace.json         # marketplace configuration
 ```
 
 ## Bot Directory (~/.claude-bot/)

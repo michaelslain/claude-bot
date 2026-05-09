@@ -7,7 +7,7 @@ import {
 
 import { sendMessage, getSessionId } from "./daemon/session.ts"
 import { loadCronJobs, loadLastFired, loadRunning, requestCronRun, stopCronJob, createCronJob, deleteCronJob, updateCronJob } from "./daemon/cron.ts"
-import { listProcesses, startProcess, stopProcess } from "./daemon/process.ts"
+import { listProcesses, startProcess, stopProcess, enableProcess, disableProcess } from "./daemon/process.ts"
 import { writeNote, deleteNote, listNotes, readNote, parseNoteRef } from "./memory/graph.ts"
 import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
@@ -216,6 +216,8 @@ async function setupBot(): Promise<{ ok: boolean; message: string }> {
           "mcp__claude-bot__process_list",
           "mcp__claude-bot__process_start",
           "mcp__claude-bot__process_stop",
+          "mcp__claude-bot__process_enable",
+          "mcp__claude-bot__process_disable",
           "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Glob(*)", "Grep(*)"
         ]
       }
@@ -395,6 +397,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           name: { type: "string", description: "Name of the process to stop" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "process_enable",
+      description: "Mark a process as enabled (will auto-start on next daemon boot). Registers the process if not already registered. Does not spawn it — call process_start to run it now.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the process to enable" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "process_disable",
+      description: "Mark a process as disabled (will not auto-start on next daemon boot). If currently running, stops it. Keeps the process registered so it can still be process_start-ed at runtime.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Name of the process to disable" },
         },
         required: ["name"],
       },
@@ -606,6 +630,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "process_stop": {
       const { name: procName } = args as { name: string }
       return toResult(stopProcess(procName))
+    }
+
+    case "process_enable": {
+      const { name: procName } = args as { name: string }
+      return toResult(await enableProcess(procName))
+    }
+
+    case "process_disable": {
+      const { name: procName } = args as { name: string }
+      return toResult(await disableProcess(procName))
     }
 
     case "message_bot": {
