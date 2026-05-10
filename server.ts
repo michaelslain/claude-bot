@@ -13,7 +13,7 @@ import type { NoteType } from "./memory/graph.ts"
 import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
 import { today, validateFolder } from "./lib/json.ts"
-import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon } from "./lib/platform.ts"
+import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon, isDaemonProcess } from "./lib/platform.ts"
 import { BOT_DIR, LOGS_DIR, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "./lib/config.ts"
 import { homedir } from "os"
 import { join } from "path"
@@ -125,6 +125,13 @@ async function getDaemonPid(): Promise<number | null> {
     if (!isNaN(pid)) { process.kill(pid, 0); return pid }
   } catch {}
   return null
+}
+
+function notDaemonError(): { ok: false; error: string } {
+  return {
+    ok: false,
+    error: `Process-management commands must run inside the daemon. This server.ts (PID ${process.pid}) is not the daemon — check ~/.claude-bot/daemon.pid and route the call through the daemon's MCP surface.`,
+  }
 }
 
 function daemonOpts() {
@@ -594,7 +601,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const noteCount = (await listNotes()).length
       const cronJobs = await loadCronJobs()
       const sessionId = await getSessionId()
-      const processes = listProcesses()
+      const { processes, orphans } = await listProcesses()
       const lastFired = await loadLastFired()
       const running = await loadRunning()
 
@@ -616,28 +623,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }),
         processes,
+        orphans,
       })
     }
 
     case "process_list":
-      return toResult({ ok: true, processes: listProcesses() })
+      return toResult({ ok: true, ...(await listProcesses()) })
 
     case "process_start": {
+      if (!(await isDaemonProcess())) return toResult(notDaemonError())
       const { name: procName } = args as { name: string }
       return toResult(startProcess(procName))
     }
 
     case "process_stop": {
+      if (!(await isDaemonProcess())) return toResult(notDaemonError())
       const { name: procName } = args as { name: string }
-      return toResult(stopProcess(procName))
+      return toResult(await stopProcess(procName))
     }
 
     case "process_enable": {
+      if (!(await isDaemonProcess())) return toResult(notDaemonError())
       const { name: procName } = args as { name: string }
       return toResult(await enableProcess(procName))
     }
 
     case "process_disable": {
+      if (!(await isDaemonProcess())) return toResult(notDaemonError())
       const { name: procName } = args as { name: string }
       return toResult(await disableProcess(procName))
     }

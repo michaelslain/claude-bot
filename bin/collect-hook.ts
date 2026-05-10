@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { readFile } from "fs/promises"
-import { writeNote } from "../memory/graph.ts"
+import { writeNote, getMemoryDir } from "../memory/graph.ts"
 
 interface SessionEndInput {
   session_id?: string
@@ -15,9 +15,16 @@ interface TranscriptEntry {
   }
 }
 
-function extractText(content: TranscriptEntry["message"] extends infer M ? M : never): string {
-  if (!content) return ""
-  const c = content.content
+const MIN_BODY_CHARS = 50
+const MAX_BODY_CHARS = 8000
+const TRUNCATE_HEAD = 4000
+const TRUNCATE_TAIL = 4000
+const TRUNCATE_MARKER = "\n\n... [truncated] ...\n\n"
+const CRON_PREFIX = "[Cron: "
+
+function extractText(message: TranscriptEntry["message"]): string {
+  if (!message) return ""
+  const c = message.content
   if (typeof c === "string") return c
   if (Array.isArray(c)) {
     return c
@@ -37,15 +44,8 @@ function stripInjectedBlocks(text: string): string {
     .trim()
 }
 
-try {
-  const input = await Bun.stdin.text()
-  const { transcript_path, session_id } = JSON.parse(input) as SessionEndInput
-
-  if (!transcript_path) process.exit(0)
-
-  const raw = await readFile(transcript_path, "utf-8")
-  const lines = raw.split("\n").filter((l) => l.trim())
-
+function extractUserMessages(rawTranscript: string): string[] {
+  const lines = rawTranscript.split("\n").filter((l) => l.trim())
   const messages: string[] = []
   for (const line of lines) {
     let entry: TranscriptEntry
@@ -59,16 +59,50 @@ try {
     const text = stripInjectedBlocks(extractText(entry.message))
     if (text) messages.push(text)
   }
+  return messages
+}
 
-  if (messages.length === 0) process.exit(0)
+export interface ProcessOptions {
+  dir?: string
+  now?: Date
+}
 
-  const now = new Date()
+export interface ProcessResult {
+  written: boolean
+  reason?: "cron" | "trivial"
+  name?: string
+  body?: string
+}
+
+export async function processTranscript(
+  rawTranscript: string,
+  sessionId: string | undefined,
+  options: ProcessOptions = {}
+): Promise<ProcessResult> {
+  const messages = extractUserMessages(rawTranscript)
+
+  // Daemon-fired cron sessions prepend "[Cron: <name>] " to every prompt
+  // (see daemon/cron.ts). Their bodies contain raw cron text that pollutes
+  // keyword recall, so drop the entire session.
+  if (messages.some((m) => m.startsWith(CRON_PREFIX))) {
+    return { written: false, reason: "cron" }
+  }
+
+  const totalChars = messages.reduce((sum, m) => sum + m.length, 0)
+  if (totalChars < MIN_BODY_CHARS) {
+    return { written: false, reason: "trivial" }
+  }
+
+  let body = messages.map((m, i) => `## message ${i + 1}\n\n${m}`).join("\n\n")
+  if (body.length > MAX_BODY_CHARS) {
+    body = body.slice(0, TRUNCATE_HEAD) + TRUNCATE_MARKER + body.slice(-TRUNCATE_TAIL)
+  }
+
+  const now = options.now ?? new Date()
   const pad = (n: number) => String(n).padStart(2, "0")
   const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  const sid = session_id ? session_id.slice(0, 8) : "unknown"
+  const sid = sessionId ? sessionId.slice(0, 8) : "unknown"
   const name = `auto-${ts}-${sid}`
-
-  const body = messages.map((m, i) => `## message ${i + 1}\n\n${m}`).join("\n\n")
 
   await writeNote(
     name,
@@ -78,9 +112,24 @@ try {
       created: now.toISOString().slice(0, 10),
       updated: now.toISOString().slice(0, 10),
     },
-    body
+    body,
+    options.dir ?? getMemoryDir()
   )
-} catch (err) {
-  console.error("[collect-hook]", err)
-  process.exit(0)
+
+  return { written: true, name, body }
+}
+
+if (import.meta.main) {
+  try {
+    const input = await Bun.stdin.text()
+    const { transcript_path, session_id } = JSON.parse(input) as SessionEndInput
+
+    if (!transcript_path) process.exit(0)
+
+    const raw = await readFile(transcript_path, "utf-8")
+    await processTranscript(raw, session_id)
+  } catch (err) {
+    console.error("[collect-hook]", err)
+    process.exit(0)
+  }
 }

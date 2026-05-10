@@ -1,8 +1,8 @@
 import { homedir } from "os"
 import { join } from "path"
 import { spawnSync } from "child_process"
-import { mkdir } from "fs/promises"
-import { LAUNCHD_LABEL, SYSTEMD_SERVICE_NAME } from "./config.ts"
+import { mkdir, readFile } from "fs/promises"
+import { LAUNCHD_LABEL, PID_FILE, SYSTEMD_SERVICE_NAME } from "./config.ts"
 
 const IS_LINUX = process.platform === "linux"
 
@@ -108,6 +108,32 @@ export async function reloadDaemon(configPath: string, config: string): Promise<
   const load = spawnSync("launchctl", ["load", configPath])
   if (load.status !== 0) return { ok: false, error: `launchctl load failed: ${load.stderr?.toString()}` }
   return { ok: true }
+}
+
+// ── Daemon-process identity ──────────────────────────────────────────────────
+
+/**
+ * True only when the calling process IS the daemon (its pid matches PID_FILE).
+ *
+ * `daemon/process.ts` keeps the `managed` map at module scope, so any process
+ * importing it has its own copy. When server.ts is loaded outside the daemon
+ * (terminal-launched MCP, plugin cache, dev hot-reload), calling
+ * startProcess/spawnProcess from there forks managed children that the actual
+ * daemon doesn't track — producing duplicate loops with the same name.
+ *
+ * Mutating MCP tools must gate on this so only the daemon's MCP surface can
+ * change process state. Read-only tools (process_list, status) work everywhere.
+ *
+ * Accepts an optional override path for testing.
+ */
+export async function isDaemonProcess(pidFile: string = PID_FILE): Promise<boolean> {
+  try {
+    const text = await readFile(pidFile, "utf-8")
+    const pid = parseInt(text.trim(), 10)
+    return Number.isFinite(pid) && pid === process.pid
+  } catch {
+    return false
+  }
 }
 
 // ── Notifications ────────────────────────────────────────────────────────────

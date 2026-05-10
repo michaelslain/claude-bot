@@ -1,7 +1,7 @@
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
 import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons, waitForRunningJobs } from "./cron.ts"
-import { startProcesses, stopProcesses } from "./process.ts"
+import { startProcesses, stopProcesses, reapOrphans } from "./process.ts"
 import { BOT_DIR, PID_FILE, LOGS_DIR, SHUTDOWN_TIMEOUT_MS, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "../lib/config.ts"
 
 function log(message: string): void {
@@ -39,6 +39,14 @@ async function main(): Promise<void> {
   await ensureDirs()
   await writePid()
   log(`Daemon starting (PID ${process.pid})`)
+
+  // Reap orphans from a previous daemon instance BEFORE starting fresh
+  // children. Without this, processes that survived the previous daemon's
+  // exit (because launchctl SIGKILL'd it before its shutdown handler
+  // finished, or because it crashed) end up running alongside the new
+  // children we're about to spawn — accumulating duplicates per restart.
+  await reapOrphans()
+  log("Orphan reaping complete")
 
   // Start background processes immediately — they're standalone scripts,
   // independent of the bot session

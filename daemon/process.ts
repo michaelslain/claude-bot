@@ -1,10 +1,12 @@
 import { homedir } from "os"
 import { join } from "path"
-import { readdir, readFile } from "fs/promises"
+import { readdir, readFile, writeFile, mkdir, unlink } from "fs/promises"
 import { spawn as nodeSpawn, type ChildProcess } from "child_process"
 import { openSync, closeSync } from "fs"
 import { parseFrontmatter } from "../lib/frontmatter"
 import { PROCESSES_DIR, LOGS_DIR, RESTART_BACKOFF_RESET_MS, RESTART_BACKOFF_MAX_MS } from "../lib/config.ts"
+
+const PIDS_SUBDIR = ".pids"
 
 export interface ProcessDef {
   name: string
@@ -24,6 +26,24 @@ export interface ProcessInfo {
   enabled: boolean
   restart: string
   restarts: number
+  /**
+   * `running`   — managed and the OS pid is alive
+   * `stopped`   — managed but no live child
+   * `stale`     — `mp.proc` was set but the OS pid is gone (cleared on observe)
+   */
+  status: "running" | "stopped" | "stale"
+}
+
+/**
+ * Surfaced when ps shows a process matching a managed def's argv that is
+ * NOT the daemon's current child for that def. Almost always an orphan from
+ * a previous daemon instance; surfacing it makes the duplicate-process bug
+ * visible instead of silent.
+ */
+export interface OrphanInfo {
+  name: string
+  pid: number
+  command: string
 }
 
 function parseArgs(raw: string | undefined): string[] {
@@ -110,9 +130,134 @@ interface ManagedProcess {
   lastStart: number
   backoff: number
   stopping: boolean
+  // Remembered so spawnProcess (called from the exit-handler restart path)
+  // and stopProcess can locate the right .pids/<name>.pid file without the
+  // caller threading the dir through.
+  processesDir: string
 }
 
 const managed = new Map<string, ManagedProcess>()
+
+// ── PID files ───────────────────────────────────────────────────────────────
+//
+// Each spawned child writes its pid to <processesDir>/.pids/<name>.pid. The
+// file is the link between a previous daemon's children and a fresh daemon
+// boot — without it, a daemon that crashes (or is SIGKILLed by launchctl
+// before its own shutdown handler runs) leaves orphans that the next daemon
+// has no way to identify. Removed on confirmed exit.
+
+function pidsDirFor(processesDir: string): string {
+  return join(processesDir, PIDS_SUBDIR)
+}
+
+async function readPidFile(processesDir: string, name: string): Promise<number | null> {
+  try {
+    const content = await readFile(join(pidsDirFor(processesDir), `${name}.pid`), "utf-8")
+    const pid = parseInt(content.trim(), 10)
+    return Number.isFinite(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+async function writePidFile(processesDir: string, name: string, pid: number): Promise<void> {
+  const dir = pidsDirFor(processesDir)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, `${name}.pid`), String(pid), "utf-8")
+}
+
+async function removePidFile(processesDir: string, name: string): Promise<void> {
+  try { await unlink(join(pidsDirFor(processesDir), `${name}.pid`)) } catch {}
+}
+
+// ── ps argv scanning ────────────────────────────────────────────────────────
+//
+// PID files are the primary mechanism, but they go stale if the daemon dies
+// uncleanly without removing them, or if a process is spawned outside the
+// supervisor. argv-matching is the defensive fallback: scan `ps` for any
+// process whose command line matches a managed def, regardless of pid file
+// state. Used for unmanaged_orphan surfacing in process_list and as a
+// belt-and-suspenders check in spawnProcess.
+
+interface PsRow { pid: number; command: string }
+
+async function scanPs(): Promise<PsRow[]> {
+  try {
+    const proc = Bun.spawn(["ps", "-ww", "-eo", "pid,command"], { stdout: "pipe", stderr: "ignore" })
+    const text = await new Response(proc.stdout).text()
+    await proc.exited
+    const rows: PsRow[] = []
+    const lines = text.split("\n")
+    // Skip header line ("  PID COMMAND")
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i]?.trim()
+      if (!line) continue
+      const m = line.match(/^(\d+)\s+(.*)$/)
+      if (!m) continue
+      rows.push({ pid: parseInt(m[1]!, 10), command: m[2]! })
+    }
+    return rows
+  } catch {
+    return []
+  }
+}
+
+function basename(path: string): string {
+  const i = path.lastIndexOf("/")
+  return i >= 0 ? path.slice(i + 1) : path
+}
+
+/**
+ * True if the given ps command line was spawned from `def`. Tokenises the
+ * command line and compares the resolved program name (basename of argv[0])
+ * plus the literal arg list. Matching basenames covers `/bin/sleep` vs
+ * `sleep`; requiring all args match in order avoids false positives between
+ * two defs that share a binary (e.g. two different `bash` scripts).
+ */
+function defMatchesCommand(def: ProcessDef, cmd: string): boolean {
+  const tokens = cmd.split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return false
+  if (tokens.length < 1 + def.args.length) return false
+
+  const cmdBase = basename(tokens[0]!)
+  const defBase = basename(def.command)
+  if (cmdBase !== defBase && tokens[0] !== def.command) return false
+
+  for (let i = 0; i < def.args.length; i++) {
+    if (tokens[i + 1] !== def.args[i]) return false
+  }
+  return true
+}
+
+function matchOrphans(def: ProcessDef, knownPid: number | null, rows: PsRow[]): PsRow[] {
+  return rows.filter(
+    (r) =>
+      r.pid !== knownPid &&
+      r.pid !== process.pid &&
+      defMatchesCommand(def, r.command),
+  )
+}
+
+async function killAndConfirm(pid: number, timeoutMs: number = 2000): Promise<void> {
+  if (!isAlive(pid)) return
+  // Try the process group first (children of `detached: true` are in their
+  // own group); fall back to the bare pid for processes we didn't spawn.
+  try { process.kill(-pid, "SIGTERM") } catch {
+    try { process.kill(pid, "SIGTERM") } catch {}
+  }
+  const softDeadline = Date.now() + timeoutMs
+  while (Date.now() < softDeadline) {
+    if (!isAlive(pid)) return
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  try { process.kill(-pid, "SIGKILL") } catch {}
+  try { process.kill(pid, "SIGKILL") } catch {}
+  const hardDeadline = Date.now() + 1000
+  while (Date.now() < hardDeadline) {
+    if (!isAlive(pid)) return
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
 
 function killProcessGroup(mp: ManagedProcess): void {
   const pid = mp.proc?.pid
@@ -143,8 +288,27 @@ function forceKill(mp: ManagedProcess): void {
   try { process.kill(pid, "SIGKILL") } catch {}
 }
 
-function spawnProcess(mp: ManagedProcess): void {
-  const { def } = mp
+async function spawnProcess(mp: ManagedProcess): Promise<void> {
+  const { def, processesDir } = mp
+
+  // Defensive orphan reap before forking: a stale pid file or an argv-match
+  // in `ps` means a previous instance of this def is still running. Kill it
+  // first — otherwise we'd create a duplicate.
+  const stalePid = await readPidFile(processesDir, def.name)
+  if (stalePid && stalePid !== mp.proc?.pid && isAlive(stalePid)) {
+    console.warn(`[process] Stale pid ${stalePid} for "${def.name}" — killing before spawn`)
+    await killAndConfirm(stalePid)
+  }
+  await removePidFile(processesDir, def.name)
+
+  const psRows = await scanPs()
+  const orphans = matchOrphans(def, mp.proc?.pid ?? null, psRows)
+  for (const o of orphans) {
+    if (!isAlive(o.pid)) continue
+    console.warn(`[process] Orphan pid ${o.pid} matches "${def.name}" (${o.command}) — killing before spawn`)
+    await killAndConfirm(o.pid)
+  }
+
   const stdoutPath = join(LOGS_DIR, `${def.name}.stdout.log`)
   const stderrPath = join(LOGS_DIR, `${def.name}.stderr.log`)
 
@@ -164,10 +328,18 @@ function spawnProcess(mp: ManagedProcess): void {
 
   mp.proc.unref()
   mp.lastStart = Date.now()
-  console.log(`[process] Started "${def.name}" (PID ${mp.proc.pid})`)
+  const spawnedPid = mp.proc.pid
+  console.log(`[process] Started "${def.name}" (PID ${spawnedPid})`)
+
+  if (spawnedPid) {
+    void writePidFile(processesDir, def.name, spawnedPid).catch((err) => {
+      console.error(`[process] Failed to write pid file for "${def.name}": ${err}`)
+    })
+  }
 
   // Watch for exit
   mp.proc.on("exit", (code, signal) => {
+    void removePidFile(processesDir, def.name)
     if (mp.stopping) return
     const exitInfo = signal ? `signal ${signal}` : `code ${code}`
     console.log(`[process] "${def.name}" exited with ${exitInfo}`)
@@ -192,15 +364,16 @@ function spawnProcess(mp: ManagedProcess): void {
 
     console.log(`[process] Restarting "${def.name}" in ${mp.backoff}ms (restart #${mp.restarts})`)
     setTimeout(() => {
-      if (!mp.stopping) spawnProcess(mp)
+      if (!mp.stopping) void spawnProcess(mp)
     }, mp.backoff)
   })
 }
 
-function registerDef(def: ProcessDef): ManagedProcess {
+function registerDef(def: ProcessDef, processesDir: string = PROCESSES_DIR): ManagedProcess {
   const existing = managed.get(def.name)
   if (existing) {
     existing.def = def
+    existing.processesDir = processesDir
     return existing
   }
   const mp: ManagedProcess = {
@@ -210,6 +383,7 @@ function registerDef(def: ProcessDef): ManagedProcess {
     lastStart: 0,
     backoff: def.restartDelay,
     stopping: false,
+    processesDir,
   }
   managed.set(def.name, mp)
   return mp
@@ -219,11 +393,45 @@ export async function startProcesses(dir: string = PROCESSES_DIR): Promise<void>
   const defs = await loadProcessDefs(dir)
   for (const def of defs) {
     const wasRegistered = managed.has(def.name)
-    const mp = registerDef(def)
+    const mp = registerDef(def, dir)
     // Only auto-spawn if enabled. Disabled defs sit in `managed` ready for
     // a runtime process_start; re-running startProcesses doesn't relaunch
     // already-running children.
-    if (def.enabled && !wasRegistered) spawnProcess(mp)
+    if (def.enabled && !wasRegistered) await spawnProcess(mp)
+  }
+}
+
+/**
+ * Reap processes left behind by a previous daemon instance. Run on daemon
+ * boot BEFORE startProcesses(): the new daemon's `managed` map is empty, so
+ * if we don't reap first, startProcesses() forks fresh children alongside
+ * the orphans and we end up supervising one while three actually run.
+ *
+ * Two-pass: (1) trust pid files for fast common case, (2) argv-scan ps as a
+ * safety net for the case where the pid file was lost or the orphan was
+ * spawned outside the supervisor.
+ */
+export async function reapOrphans(dir: string = PROCESSES_DIR): Promise<void> {
+  const defs = await loadProcessDefs(dir)
+  if (defs.length === 0) return
+
+  for (const def of defs) {
+    const stalePid = await readPidFile(dir, def.name)
+    if (stalePid && isAlive(stalePid)) {
+      console.warn(`[process] Reaping orphan pid ${stalePid} for "${def.name}" (stale pid file)`)
+      await killAndConfirm(stalePid)
+    }
+    await removePidFile(dir, def.name)
+  }
+
+  const psRows = await scanPs()
+  for (const def of defs) {
+    const orphans = matchOrphans(def, null, psRows)
+    for (const o of orphans) {
+      if (!isAlive(o.pid)) continue
+      console.warn(`[process] Reaping orphan pid ${o.pid} for "${def.name}" (argv match: ${o.command})`)
+      await killAndConfirm(o.pid)
+    }
   }
 }
 
@@ -257,6 +465,20 @@ export async function stopProcesses(timeoutMs: number = 3000): Promise<void> {
     }
   }
 
+  // Final confirmation: poll until SIGKILL'd children are actually gone
+  // before clearing in-memory state. "Signal sent" ≠ "process dead"; if we
+  // clear too eagerly the next daemon boot can't tie pid file → managed.
+  const hardDeadline = Date.now() + 2000
+  while (Date.now() < hardDeadline) {
+    const stillAlive = active.filter((mp) => mp.proc?.pid && isAlive(mp.proc.pid))
+    if (stillAlive.length === 0) break
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+
+  for (const mp of active) {
+    await removePidFile(mp.processesDir, mp.def.name)
+  }
+
   managed.clear()
 }
 
@@ -267,29 +489,105 @@ export function startProcess(name: string): { ok: boolean; error?: string } {
 
   mp.stopping = false
   mp.backoff = mp.def.restartDelay
-  spawnProcess(mp)
+  void spawnProcess(mp)
   return { ok: true }
 }
 
-export function stopProcess(name: string): { ok: boolean; error?: string } {
+/**
+ * Send SIGTERM, poll for actual exit, then escalate to SIGKILL on timeout.
+ * Returns only after the kernel confirms the pid is gone, then clears
+ * `mp.proc` and the pid file so a subsequent process_start works.
+ *
+ * Async because the previous sync version returned the moment SIGTERM was
+ * sent — callers (notably disableProcess) then proceeded as if the child
+ * were dead while in reality it kept running for seconds.
+ */
+export async function stopProcess(name: string, timeoutMs: number = 3000): Promise<{ ok: boolean; error?: string }> {
   const mp = managed.get(name)
   if (!mp) return { ok: false, error: `No process definition found for "${name}"` }
-  if (!mp.proc) return { ok: false, error: `"${name}" is not running` }
+  const proc = mp.proc
+  if (!proc) return { ok: false, error: `"${name}" is not running` }
+  const pid = proc.pid
+  if (!pid) {
+    mp.proc = null
+    return { ok: true }
+  }
 
   mp.stopping = true
   killProcessGroup(mp)
+
+  const softDeadline = Date.now() + timeoutMs
+  while (Date.now() < softDeadline) {
+    if (!isAlive(pid)) break
+    await new Promise((r) => setTimeout(r, 100))
+  }
+
+  if (isAlive(pid)) {
+    console.warn(`[process] "${name}" (PID ${pid}) did not exit on SIGTERM — sending SIGKILL`)
+    forceKill(mp)
+    const hardDeadline = Date.now() + 2000
+    while (Date.now() < hardDeadline) {
+      if (!isAlive(pid)) break
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+
+  mp.proc = null
+  await removePidFile(mp.processesDir, name)
   return { ok: true }
 }
 
-export function listProcesses(): ProcessInfo[] {
-  return Array.from(managed.values()).map((mp) => ({
-    name: mp.def.name,
-    pid: mp.proc?.pid ?? null,
-    running: mp.proc !== null,
-    enabled: mp.def.enabled,
-    restart: mp.def.restart,
-    restarts: mp.restarts,
-  }))
+/**
+ * Returns the supervisor's view of managed processes plus any unmanaged
+ * orphans matching a managed def's argv. Cross-references the in-memory
+ * `managed` map against `ps` so:
+ *   - a `mp.proc` entry whose pid is dead reports `status: "stale"` and
+ *     gets cleared (so the next process_start can succeed)
+ *   - a process in `ps` that matches a def's argv but isn't `mp.proc.pid`
+ *     surfaces as an unmanaged_orphan, making the duplicate-process bug
+ *     visible to operators instead of silent.
+ */
+export async function listProcesses(): Promise<{ processes: ProcessInfo[]; orphans: OrphanInfo[] }> {
+  const psRows = await scanPs()
+  const processes: ProcessInfo[] = []
+  const orphans: OrphanInfo[] = []
+
+  for (const mp of managed.values()) {
+    let pid: number | null = null
+    let running = false
+    let status: ProcessInfo["status"] = "stopped"
+
+    if (mp.proc?.pid) {
+      if (isAlive(mp.proc.pid)) {
+        pid = mp.proc.pid
+        running = true
+        status = "running"
+      } else {
+        // Child died but exit handler hasn't fired (or was missed). Clear
+        // the stale ref so process_start can succeed.
+        console.warn(`[process] "${mp.def.name}" pid ${mp.proc.pid} no longer alive — clearing stale ref`)
+        mp.proc = null
+        status = "stale"
+        await removePidFile(mp.processesDir, mp.def.name)
+      }
+    }
+
+    processes.push({
+      name: mp.def.name,
+      pid,
+      running,
+      enabled: mp.def.enabled,
+      restart: mp.def.restart,
+      restarts: mp.restarts,
+      status,
+    })
+
+    for (const o of matchOrphans(mp.def, pid, psRows)) {
+      orphans.push({ name: mp.def.name, pid: o.pid, command: o.command })
+    }
+  }
+
+  return { processes, orphans }
 }
 
 /**
@@ -316,7 +614,7 @@ export async function enableProcess(name: string, dir: string = PROCESSES_DIR): 
     await writeProcessFile(filePath, frontmatter, body)
   }
 
-  registerDef({ ...def, enabled: true })
+  registerDef({ ...def, enabled: true }, dir)
   return { ok: true }
 }
 
@@ -340,9 +638,12 @@ export async function disableProcess(name: string, dir: string = PROCESSES_DIR):
 
   // Stop first if running. stopProcess only works for entries in `managed`,
   // so register the def before stopping (no-op if already registered).
-  registerDef({ ...def, enabled: false })
+  // CRITICAL: must `await` — the previous sync version sent SIGTERM and
+  // returned, leaving the bash child to outlive the disable call (and keep
+  // firing its inner loop) until something else killed it.
+  registerDef({ ...def, enabled: false }, dir)
   const mp = managed.get(name)
-  if (mp?.proc) stopProcess(name)
+  if (mp?.proc) await stopProcess(name)
 
   const isDisabled = frontmatter.enabled === "false"
   if (!isDisabled) {

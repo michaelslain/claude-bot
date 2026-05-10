@@ -1,16 +1,40 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test"
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "fs/promises"
+import { spawn as nodeSpawn, type ChildProcess } from "child_process"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
   loadProcessDefs,
   startProcesses,
   stopProcesses,
+  stopProcess,
   startProcess,
   listProcesses,
   enableProcess,
   disableProcess,
+  reapOrphans,
 } from "./process"
+
+function isAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+async function waitUntil(fn: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await fn()) return true
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  return await fn()
+}
+
+const externalChildren: ChildProcess[] = []
+function spawnExternal(command: string, args: string[]): ChildProcess {
+  const child = nodeSpawn(command, args, { stdio: "ignore", detached: true })
+  child.unref()
+  externalChildren.push(child)
+  return child
+}
 
 let testDir: string
 
@@ -35,6 +59,15 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await stopProcesses(2000)
+  // Reap any external children spawned by tests so we don't leak sleep
+  // processes between test runs.
+  for (const child of externalChildren) {
+    if (child.pid && isAlive(child.pid)) {
+      try { process.kill(-child.pid, "SIGKILL") } catch {}
+      try { process.kill(child.pid, "SIGKILL") } catch {}
+    }
+  }
+  externalChildren.length = 0
   await rm(testDir, { recursive: true, force: true })
 })
 
@@ -72,9 +105,9 @@ describe("startProcesses (boot path)", () => {
 
     await startProcesses(testDir)
 
-    const list = listProcesses()
-    const onEntry = list.find((p) => p.name === "auto-on")
-    const offEntry = list.find((p) => p.name === "auto-off")
+    const { processes } = await listProcesses()
+    const onEntry = processes.find((p) => p.name === "auto-on")
+    const offEntry = processes.find((p) => p.name === "auto-off")
 
     expect(onEntry).toBeDefined()
     expect(onEntry?.enabled).toBe(true)
@@ -88,10 +121,10 @@ describe("startProcesses (boot path)", () => {
   it("re-running startProcesses does not respawn already-running enabled processes", async () => {
     await writeProcessDef("steady", { name: "steady", command: "sleep", args: "60", enabled: "true", restart: "never" })
     await startProcesses(testDir)
-    const firstPid = listProcesses().find((p) => p.name === "steady")?.pid
+    const firstPid = (await listProcesses()).processes.find((p) => p.name === "steady")?.pid
 
     await startProcesses(testDir)
-    const secondPid = listProcesses().find((p) => p.name === "steady")?.pid
+    const secondPid = (await listProcesses()).processes.find((p) => p.name === "steady")?.pid
 
     expect(firstPid).toBeDefined()
     expect(secondPid).toBe(firstPid!)
@@ -109,7 +142,7 @@ describe("enableProcess", () => {
     expect(onDisk).toContain("enabled: true")
     expect(onDisk).not.toContain("enabled: false")
 
-    const entry = listProcesses().find((p) => p.name === "dormant")
+    const entry = (await listProcesses()).processes.find((p) => p.name === "dormant")
     expect(entry?.enabled).toBe(true)
     expect(entry?.running).toBe(false) // enable does NOT spawn
   })
@@ -121,7 +154,12 @@ describe("enableProcess", () => {
     const startResult = startProcess("dormant")
     expect(startResult.ok).toBe(true)
 
-    const entry = listProcesses().find((p) => p.name === "dormant")
+    // startProcess kicks off spawn asynchronously; wait for it to register a pid.
+    await waitUntil(async () => {
+      const e = (await listProcesses()).processes.find((p) => p.name === "dormant")
+      return !!e?.running
+    })
+    const entry = (await listProcesses()).processes.find((p) => p.name === "dormant")
     expect(entry?.running).toBe(true)
   })
 
@@ -185,24 +223,19 @@ describe("disableProcess", () => {
     await writeProcessDef("running-one", { name: "running-one", command: "sleep", args: "60", enabled: "true", restart: "never" })
 
     await startProcesses(testDir)
-    const beforePid = listProcesses().find((p) => p.name === "running-one")?.pid
+    const beforePid = (await listProcesses()).processes.find((p) => p.name === "running-one")?.pid
     expect(beforePid).toBeGreaterThan(0)
 
     await disableProcess("running-one", testDir)
 
-    // Give SIGTERM time to land
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // disableProcess now awaits stopProcess, which polls until the OS pid is
+    // gone — no extra sleep needed.
+    expect(isAlive(beforePid!)).toBe(false)
 
-    // Verify the OS-level child was killed. Note: mp.proc isn't cleared here
-    // (existing design — stopProcesses polls it for SIGKILL escalation), so we
-    // check the kernel directly rather than listProcesses().running.
-    let alive = true
-    try { process.kill(beforePid!, 0) } catch { alive = false }
-    expect(alive).toBe(false)
-
-    const entry = listProcesses().find((p) => p.name === "running-one")
+    const entry = (await listProcesses()).processes.find((p) => p.name === "running-one")
     expect(entry).toBeDefined() // still registered
     expect(entry?.enabled).toBe(false)
+    expect(entry?.running).toBe(false) // mp.proc cleared by stopProcess
 
     const onDisk = await readDefFile("running-one")
     expect(onDisk).toContain("enabled: false")
@@ -233,20 +266,19 @@ describe("disable persists across daemon restart", () => {
 
     // Boot 1: starts running
     await startProcesses(testDir)
-    expect(listProcesses().find((p) => p.name === "toggled")?.running).toBe(true)
+    expect((await listProcesses()).processes.find((p) => p.name === "toggled")?.running).toBe(true)
 
     // Disable while running
     await disableProcess("toggled", testDir)
-    await new Promise((resolve) => setTimeout(resolve, 200))
 
     // Simulate daemon restart: clear in-memory state, then re-boot from same dir
     await stopProcesses(2000)
-    expect(listProcesses()).toEqual([])
+    expect((await listProcesses()).processes).toEqual([])
 
     await startProcesses(testDir)
 
     // After restart: registered (in `managed`) but NOT auto-spawned
-    const entry = listProcesses().find((p) => p.name === "toggled")
+    const entry = (await listProcesses()).processes.find((p) => p.name === "toggled")
     expect(entry).toBeDefined()
     expect(entry?.enabled).toBe(false)
     expect(entry?.running).toBe(false)
@@ -254,6 +286,127 @@ describe("disable persists across daemon restart", () => {
     // Runtime process_start still works on the disabled entry
     const startResult = startProcess("toggled")
     expect(startResult.ok).toBe(true)
-    expect(listProcesses().find((p) => p.name === "toggled")?.running).toBe(true)
+    await waitUntil(async () => {
+      const e = (await listProcesses()).processes.find((p) => p.name === "toggled")
+      return !!e?.running
+    })
+    expect((await listProcesses()).processes.find((p) => p.name === "toggled")?.running).toBe(true)
+  })
+})
+
+describe("stopProcess (kernel-confirmed exit)", () => {
+  it("returns only after the OS pid is confirmed gone", async () => {
+    await writeProcessDef("stopme", { name: "stopme", command: "sleep", args: "60", enabled: "true", restart: "never" })
+
+    await startProcesses(testDir)
+    const pid = (await listProcesses()).processes.find((p) => p.name === "stopme")?.pid
+    expect(pid).toBeGreaterThan(0)
+
+    const result = await stopProcess("stopme")
+    expect(result.ok).toBe(true)
+
+    // Kernel must already report the pid as gone the instant stopProcess
+    // returns — no extra polling. If this flakes the SIGKILL escalation is
+    // broken.
+    expect(isAlive(pid!)).toBe(false)
+
+    const entry = (await listProcesses()).processes.find((p) => p.name === "stopme")
+    expect(entry?.running).toBe(false) // mp.proc cleared
+    expect(entry?.pid).toBeNull()
+  })
+})
+
+describe("orphan handling", () => {
+  it("spawnProcess reaps a stale-pid-file orphan before forking", async () => {
+    // Spawn an external sleep process to stand in for an orphan from a
+    // previous daemon. Plant its pid in the pid file as if the supervisor had
+    // tracked it.
+    const orphan = spawnExternal("sleep", ["120"])
+    expect(orphan.pid).toBeGreaterThan(0)
+
+    await mkdir(join(testDir, ".pids"), { recursive: true })
+    await writeFile(join(testDir, ".pids", "ghosted.pid"), String(orphan.pid))
+
+    await writeProcessDef("ghosted", { name: "ghosted", command: "sleep", args: "60", enabled: "true", restart: "never" })
+
+    await startProcesses(testDir)
+
+    // The orphan must be dead — spawnProcess reaped it before forking.
+    expect(await waitUntil(() => !isAlive(orphan.pid!), 3000)).toBe(true)
+
+    // Exactly one supervised child is running.
+    const list = await listProcesses()
+    const entry = list.processes.find((p) => p.name === "ghosted")
+    expect(entry?.running).toBe(true)
+    expect(entry?.pid).not.toBe(orphan.pid)
+  })
+
+  it("reapOrphans (daemon-boot pass) kills argv-matching processes", async () => {
+    await writeProcessDef("argv-orphan", { name: "argv-orphan", command: "sleep", args: "120", enabled: "true", restart: "never" })
+
+    // Simulate a process left behind by a previous daemon — no pid file, but
+    // argv matches the def.
+    const orphan = spawnExternal("sleep", ["120"])
+    expect(orphan.pid).toBeGreaterThan(0)
+    expect(isAlive(orphan.pid!)).toBe(true)
+
+    await reapOrphans(testDir)
+
+    expect(await waitUntil(() => !isAlive(orphan.pid!), 3000)).toBe(true)
+  })
+
+  it("simulated daemon restart leaves no orphan after reap + start", async () => {
+    await writeProcessDef("reboot-me", { name: "reboot-me", command: "sleep", args: "120", enabled: "true", restart: "never" })
+
+    await startProcesses(testDir)
+    const firstPid = (await listProcesses()).processes.find((p) => p.name === "reboot-me")?.pid
+    expect(firstPid).toBeGreaterThan(0)
+
+    // Simulate a hard daemon death: clear in-memory state WITHOUT killing the
+    // child. The child becomes an orphan reparented to PID 1, exactly like
+    // what happens when launchctl SIGKILLs the daemon.
+    //
+    // We can't `managed.clear()` from outside; instead we mark stopping=false
+    // on every entry and use stopProcesses but skip the kill — there's no
+    // exposed API for "forget without killing". So we approximate: write the
+    // pid file (if not already), then have stopProcesses kill — then we
+    // re-spawn the child by hand to play the role of the orphan that
+    // survived a hard daemon kill.
+    await stopProcesses(2000)
+    const orphan = spawnExternal("sleep", ["120"])
+    await mkdir(join(testDir, ".pids"), { recursive: true })
+    await writeFile(join(testDir, ".pids", "reboot-me.pid"), String(orphan.pid))
+
+    // New daemon boot: reap then start.
+    await reapOrphans(testDir)
+    await startProcesses(testDir)
+
+    expect(await waitUntil(() => !isAlive(orphan.pid!), 3000)).toBe(true)
+
+    const list = await listProcesses()
+    const entry = list.processes.find((p) => p.name === "reboot-me")
+    expect(entry?.running).toBe(true)
+    expect(entry?.pid).not.toBe(orphan.pid)
+    // No unmanaged orphans surfaced — the only running process matching the
+    // def's argv is the supervised one.
+    expect(list.orphans).toEqual([])
+  })
+
+  it("listProcesses surfaces unmanaged_orphan when an external process matches", async () => {
+    await writeProcessDef("watched", { name: "watched", command: "sleep", args: "300", enabled: "true", restart: "never" })
+
+    await startProcesses(testDir)
+    const supervisedPid = (await listProcesses()).processes.find((p) => p.name === "watched")?.pid
+    expect(supervisedPid).toBeGreaterThan(0)
+
+    // Spawn a second process with the same argv — outside the supervisor.
+    // listProcesses must surface it as an orphan.
+    const rogue = spawnExternal("sleep", ["300"])
+    expect(rogue.pid).toBeGreaterThan(0)
+
+    const list = await listProcesses()
+    expect(list.orphans.some((o) => o.name === "watched" && o.pid === rogue.pid)).toBe(true)
+    // The supervised child still appears as a normal entry.
+    expect(list.processes.find((p) => p.name === "watched")?.running).toBe(true)
   })
 })
