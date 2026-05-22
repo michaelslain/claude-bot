@@ -140,11 +140,11 @@ export async function isDaemonProcess(pidFile: string = PID_FILE): Promise<boole
 
 export function notify(title: string, message: string): void {
   try {
-    const trimmed = message.slice(0, 200)
+    const trimmed = message.replace(/\s+/g, " ").trim().slice(0, 200)
     if (IS_LINUX) {
       Bun.spawnSync(["notify-send", title, trimmed])
     } else {
-      const escaped = trimmed.replace(/"/g, '\\"').replace(/\n/g, " ")
+      const escaped = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
       Bun.spawnSync(["osascript", "-e", `display notification "${escaped}" with title "${title}"`])
     }
   } catch (err) {

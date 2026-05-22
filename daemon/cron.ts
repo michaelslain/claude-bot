@@ -308,6 +308,8 @@ export function shouldCatchUp(job: CronJob, lastFired: Record<string, LastFiredE
 
 const CRON_RESULT_INSTRUCTION = `\n\nIMPORTANT: When you are done, print exactly [CRON_RESULT:SUCCESS] if the task completed successfully, or [CRON_RESULT:FAILURE] if it failed. This must be the last thing you print.`
 
+const CRON_NOTIFY_INSTRUCTION = `\n\nIMPORTANT: This cron has notifications enabled. Just before the [CRON_RESULT:...] marker, print one line of the form:\n[NOTIFY: <one short plain-text sentence, max ~120 chars, no markdown, no backticks, no emoji, no newlines>]\nThis line is shown verbatim as a macOS notification — keep it concise and human-readable.`
+
 function parseCronResult(output: string): "success" | "failed" | "unknown" {
   // Search from the end for the last marker
   const successIdx = output.lastIndexOf("[CRON_RESULT:SUCCESS]")
@@ -315,6 +317,13 @@ function parseCronResult(output: string): "success" | "failed" | "unknown" {
   if (successIdx === -1 && failureIdx === -1) return "unknown"
   if (successIdx > failureIdx) return "success"
   return "failed"
+}
+
+function parseNotifyMessage(output: string): string | null {
+  // Match the last [NOTIFY: ...] line in the output. Non-greedy, single-line.
+  const matches = [...output.matchAll(/\[NOTIFY:\s*([^\]\n]+?)\s*\]/g)]
+  if (matches.length === 0) return null
+  return matches[matches.length - 1][1].trim() || null
 }
 
 // ── Protected directory guard ───────────────────────────────────────��──────
@@ -418,7 +427,7 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
   // Run the actual session in the background (not awaited by caller)
   const sessionPromise = (async () => {
     try {
-      const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}`
+      const prompt = `[Cron: ${job.name}] ${job.prompt}${CRON_RESULT_INSTRUCTION}${job.notify ? CRON_NOTIFY_INSTRUCTION : ""}`
       const response = await sendMessage(prompt, { model: job.model, effort: job.effort, abortController: ac, timeoutSecs: job.timeout, newSession: true })
 
       if (job.waitFor) {
@@ -439,7 +448,8 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
       await updateLastFired(job.name, entry)
       if (job.notify) {
         const status = result === "success" ? "completed" : result === "failed" ? "failed" : "completed (unknown result)"
-        notify(`claude-bot: ${job.name}`, response.result || `Cron job ${status}.`)
+        const notifyMsg = parseNotifyMessage(response.result) || `Cron job ${status}.`
+        notify(`claude-bot: ${job.name}`, notifyMsg)
       }
     } catch (err) {
       if (ac.signal.aborted) {
