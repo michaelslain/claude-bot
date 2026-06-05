@@ -1,6 +1,10 @@
 {
   "name": "claude-bot",
+  "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "claude-bot-ensure-installed": "./bin/ensure-installed.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
