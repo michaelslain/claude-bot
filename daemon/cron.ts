@@ -7,6 +7,7 @@ import { sendMessage } from "./session"
 const execFileAsync = promisify(execFile)
 import { notify } from "../lib/platform"
 import { parseFrontmatter } from "../lib/frontmatter"
+import { heartbeatDevice, isOwner } from "../lib/owner"
 
 export { CRONS_DIR } from "../lib/config.ts"
 import { CRONS_DIR, PROCESSES_DIR, LAST_FIRED_FILE, RUNNING_FILE, TRIGGER_DIR, DEFAULT_CRON_TIMEOUT, CRON_CHECK_INTERVAL_MS, TRIGGER_CHECK_INTERVAL_MS, SHUTDOWN_POLL_MS } from "../lib/config.ts"
@@ -505,6 +506,10 @@ async function fireJob(job: CronJob, lastFired: Record<string, LastFiredEntry>):
  * at "!runningJobs.has(name)" flips — the else branch markDone()s live jobs.
  */
 export async function recoverInterruptedCrons(): Promise<void> {
+  // Not the owner device — idle. Don't re-fire interrupted crons; the owner
+  // owns the work. (Unclaimed => isOwner true => behaves exactly as before.)
+  if (!(await isOwner())) return
+
   const running = await loadRunning()
   const names = Object.keys(running)
   if (names.length === 0) return
@@ -531,6 +536,9 @@ export function startCronScheduler(): void {
 
   // Run catch-up check immediately on start
   ;(async () => {
+    // Heartbeat even on a non-owner device so it stays selectable.
+    await heartbeatDevice()
+    if (!(await isOwner())) return
     const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
     for (const job of jobs) {
       if (job.enabled && shouldCatchUp(job, lastFired) && !runningJobs.has(job.name)) {
@@ -544,6 +552,12 @@ export function startCronScheduler(): void {
   triggerInterval = setInterval(() => { processTriggers() }, TRIGGER_CHECK_INTERVAL_MS)
 
   cronInterval = setInterval(async () => {
+    // Heartbeat every tick — even when idle / not owner — so this device stays
+    // selectable in devices.json.
+    await heartbeatDevice()
+    // Not the owner device: idle. Skip firing crons entirely (still heartbeats).
+    // Unclaimed (no owner.json) => isOwner true => normal behavior unchanged.
+    if (!(await isOwner())) return
     const now = new Date()
     const [jobs, lastFired] = await Promise.all([loadCronJobs(), loadLastFired()])
     for (const job of jobs) {
@@ -645,6 +659,15 @@ async function processTriggers(): Promise<void> {
 
   const triggers = files.filter(f => !f.startsWith("."))
   if (triggers.length === 0) return
+
+  // Not the owner device: idle. Consume the trigger files so they don't pile
+  // up, but don't fire. Unclaimed => isOwner true => normal behavior.
+  if (!(await isOwner())) {
+    for (const name of triggers) {
+      try { await unlink(join(TRIGGER_DIR, name)) } catch {}
+    }
+    return
+  }
 
   const lastFired = await loadLastFired()
   for (const name of triggers) {

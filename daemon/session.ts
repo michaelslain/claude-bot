@@ -1,6 +1,7 @@
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk"
 import { readFile, writeFile, mkdir } from "fs/promises"
 import { BOT_DIR, SESSION_FILE } from "../lib/config.ts"
+import { isOwner } from "../lib/owner.ts"
 
 /** Messages emitted by the Claude Agent SDK query stream. */
 interface SdkMessage {
@@ -40,6 +41,14 @@ export interface SendOptions {
 }
 
 export async function sendMessage(message: string, opts?: SendOptions): Promise<BotResponse> {
+  // Multi-device gating (CONTRACT v1): when this device is NOT the owner, the
+  // persistent bot session stays idle — we don't start or resume it. When the
+  // install is unclaimed (no owner.json) isOwner() is true, so single-device
+  // installs behave exactly as before.
+  if (!(await isOwner())) {
+    throw new Error("This device is not the owner — bot session is idle. Use set_owner_device to claim it.")
+  }
+
   const existingSessionId = await getSessionId()
 
   const options: Record<string, unknown> = {

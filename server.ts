@@ -14,6 +14,7 @@ import { query } from "./memory/query.ts"
 import { dream, getDreamConfig, updateDreamConfig } from "./memory/dream.ts"
 import { today, validateFolder } from "./lib/json.ts"
 import { daemonConfigPath, generateDaemonConfig, installDaemon, unloadDaemon, reloadDaemon, isDaemonProcess } from "./lib/platform.ts"
+import { deviceInfo, listDevices, setOwnerDevice } from "./lib/owner.ts"
 import { BOT_DIR, LOGS_DIR, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "./lib/config.ts"
 import { homedir } from "os"
 import { join } from "path"
@@ -505,6 +506,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "device_info",
+      description: "Get this device's identity and ownership status: deviceId, label, whether it's the owner, and the current owner record (or null if unclaimed).",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "device_list",
+      description: "List all devices known to this claude-bot install (from devices.json) with their labels, last-seen times, and owner/self flags.",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "set_owner_device",
+      description: "Claim ownership for a device by id. The device must already be present in devices.json (it must have heartbeated). Writes owner.json and returns device_info().",
+      inputSchema: {
+        type: "object",
+        properties: {
+          deviceId: { type: "string", description: "The deviceId to make the owner (must exist in devices.json)" },
+        },
+        required: ["deviceId"],
+      },
+    },
+    {
       name: "setup",
       description: "First-time install of claude-bot. Creates ~/.claude-bot/ directory, CLAUDE.md, MCP config, crons, and daemon service. Only runs once — fails if already installed.",
       inputSchema: { type: "object", properties: {}, required: [] },
@@ -720,6 +742,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "cron_delete": {
       const { name: cronName } = args as { name: string }
       return toResult(await deleteCronJob(cronName))
+    }
+
+    case "device_info":
+      return toResult(await deviceInfo())
+
+    case "device_list":
+      return toResult(await listDevices())
+
+    case "set_owner_device": {
+      const { deviceId } = args as { deviceId: string }
+      try {
+        return toResult(await setOwnerDevice(deviceId))
+      } catch (err) {
+        return toResult({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
     }
 
     case "setup": {

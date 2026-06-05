@@ -2,6 +2,7 @@ import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
 import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons, waitForRunningJobs } from "./cron.ts"
 import { startProcesses, stopProcesses, reapOrphans } from "./process.ts"
+import { heartbeatDevice, isOwner } from "../lib/owner.ts"
 import { BOT_DIR, PID_FILE, LOGS_DIR, SHUTDOWN_TIMEOUT_MS, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "../lib/config.ts"
 
 function log(message: string): void {
@@ -62,24 +63,36 @@ async function main(): Promise<void> {
   // Safe to run before session init because fireJob uses newSession: true.
   await recoverInterruptedCrons()
 
-  // Start cron scheduler (tick loop only — crons wait for session on fire)
+  // Heartbeat this device immediately so it's selectable before the first tick.
+  await heartbeatDevice()
+
+  // Start cron scheduler (tick loop only — crons wait for session on fire).
+  // The tick keeps heartbeating and gates cron firing on ownership, so the
+  // scheduler runs on every device; only the owner fires jobs.
   startCronScheduler()
   log("Cron scheduler started")
 
-  // Initialize bot session (can take 30+ seconds)
-  log("Initializing bot session...")
-  try {
-    const response = await sendMessage(
-      "You are now running as a background daemon. Check memory for any prior context. Set up any crons you need."
-    )
-    log(`Bot session initialized (session: ${response.sessionId})`)
-  } catch (err) {
-    log(`Warning: Failed to initialize bot session: ${err}`)
-    log("Continuing anyway — session will be created on first message")
-  }
+  // Only the owner device starts/keeps the persistent bot session active. A
+  // non-owner daemon idles (but keeps heartbeating via the cron tick). When
+  // unclaimed (no owner.json) isOwner() is true => behaves exactly as before.
+  if (await isOwner()) {
+    // Initialize bot session (can take 30+ seconds)
+    log("Initializing bot session...")
+    try {
+      const response = await sendMessage(
+        "You are now running as a background daemon. Check memory for any prior context. Set up any crons you need."
+      )
+      log(`Bot session initialized (session: ${response.sessionId})`)
+    } catch (err) {
+      log(`Warning: Failed to initialize bot session: ${err}`)
+      log("Continuing anyway — session will be created on first message")
+    }
 
-  const sessionId = await getSessionId()
-  log(`Daemon ready (session: ${sessionId ?? "pending"})`)
+    const sessionId = await getSessionId()
+    log(`Daemon ready (session: ${sessionId ?? "pending"})`)
+  } else {
+    log("Not the owner device — idling (heartbeating only, no session, no crons)")
+  }
 
   // Graceful shutdown
   process.on("SIGTERM", () => shutdown("SIGTERM"))
