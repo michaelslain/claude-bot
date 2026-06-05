@@ -5,6 +5,9 @@
   "bin": {
     "claude-bot-ensure-installed": "./bin/ensure-installed.ts"
   },
+  "scripts": {
+    "bundle": "bun run scripts/bundle.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
