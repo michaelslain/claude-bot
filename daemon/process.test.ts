@@ -13,6 +13,8 @@ import {
   enableProcess,
   disableProcess,
   reapOrphans,
+  requestProcessRun,
+  processProcessTriggers,
 } from "./process"
 
 function isAlive(pid: number): boolean {
@@ -408,5 +410,124 @@ describe("orphan handling", () => {
     expect(list.orphans.some((o) => o.name === "watched" && o.pid === rogue.pid)).toBe(true)
     // The supervised child still appears as a normal entry.
     expect(list.processes.find((p) => p.name === "watched")?.running).toBe(true)
+  })
+})
+
+// ── Process trigger port ──────────────────────────────────────────────────────
+// Mirror of the cron trigger port: an external program flips a process's
+// frontmatter and drops a trigger file (named by FILE BASENAME); the daemon
+// reconciles that process's runtime to match disk, then deletes the trigger.
+
+const TRIGGERS_SUBDIR = ".triggers"
+
+async function dropTrigger(name: string): Promise<void> {
+  await mkdir(join(testDir, TRIGGERS_SUBDIR), { recursive: true })
+  await writeFile(join(testDir, TRIGGERS_SUBDIR, name), new Date().toISOString(), "utf-8")
+}
+
+function triggerExists(name: string): Promise<boolean> {
+  return Bun.file(join(testDir, TRIGGERS_SUBDIR, name)).exists()
+}
+
+// Mark testDir (used as the owner `home` here) as owned by another device so
+// isOwner(testDir) === false. Mirrors how owner.test.ts fakes non-ownership.
+async function makeNonOwner(): Promise<void> {
+  await writeFile(
+    join(testDir, "owner.json"),
+    JSON.stringify({ ownerDeviceId: "some-other-device", ownerLabel: "other-box", updatedAt: new Date().toISOString() }),
+    "utf-8",
+  )
+}
+
+describe("processProcessTriggers (reconcile runtime ↔ disk)", () => {
+  it("stops a running process when its disk frontmatter is now enabled: false", async () => {
+    await writeProcessDef("stoppable", { name: "stoppable", command: "sleep", args: "60", enabled: "true", restart: "never" })
+    await startProcesses(testDir)
+    const pid = (await listProcesses()).processes.find((p) => p.name === "stoppable")?.pid
+    expect(pid).toBeGreaterThan(0)
+
+    // External tool flips frontmatter to disabled, then drops the trigger.
+    await writeProcessDef("stoppable", { name: "stoppable", command: "sleep", args: "60", enabled: "false", restart: "never" })
+    await dropTrigger("stoppable")
+
+    await processProcessTriggers(testDir, testDir)
+
+    expect(isAlive(pid!)).toBe(false)
+    expect((await listProcesses()).processes.find((p) => p.name === "stoppable")?.running).toBe(false)
+    expect(await triggerExists("stoppable")).toBe(false)
+  })
+
+  it("starts a disabled-on-disk process flipped to enabled: true", async () => {
+    // Registered but not running (never started). Disk starts disabled, then
+    // the external tool flips it to enabled and drops the trigger.
+    await writeProcessDef("startable", { name: "startable", command: "sleep", args: "60", enabled: "false", restart: "never" })
+    await startProcesses(testDir) // registers it, does not spawn (disabled)
+    expect((await listProcesses()).processes.find((p) => p.name === "startable")?.running).toBe(false)
+
+    await writeProcessDef("startable", { name: "startable", command: "sleep", args: "60", enabled: "true", restart: "never" })
+    await dropTrigger("startable")
+
+    await processProcessTriggers(testDir, testDir)
+
+    expect(await waitUntil(async () => {
+      const e = (await listProcesses()).processes.find((p) => p.name === "startable")
+      return !!e?.running
+    })).toBe(true)
+    expect(await triggerExists("startable")).toBe(false)
+  })
+
+  it("is a no-op when disk state already matches runtime", async () => {
+    await writeProcessDef("matched", { name: "matched", command: "sleep", args: "60", enabled: "true", restart: "never" })
+    await startProcesses(testDir)
+    const pid = (await listProcesses()).processes.find((p) => p.name === "matched")?.pid
+    expect(pid).toBeGreaterThan(0)
+
+    // Trigger with no disk change: still enabled, still running → no-op.
+    await dropTrigger("matched")
+    await processProcessTriggers(testDir, testDir)
+
+    expect(isAlive(pid!)).toBe(true) // untouched
+    expect((await listProcesses()).processes.find((p) => p.name === "matched")?.pid).toBe(pid!)
+    expect(await triggerExists("matched")).toBe(false) // consumed
+  })
+
+  it("non-owner device consumes triggers without starting/stopping", async () => {
+    await writeProcessDef("guarded", { name: "guarded", command: "sleep", args: "60", enabled: "true", restart: "never" })
+    await startProcesses(testDir)
+    const pid = (await listProcesses()).processes.find((p) => p.name === "guarded")?.pid
+    expect(pid).toBeGreaterThan(0)
+
+    // Disk says disabled, but this device is not the owner — must NOT act.
+    await writeProcessDef("guarded", { name: "guarded", command: "sleep", args: "60", enabled: "false", restart: "never" })
+    await makeNonOwner()
+    await dropTrigger("guarded")
+
+    await processProcessTriggers(testDir, testDir)
+
+    expect(isAlive(pid!)).toBe(true) // still running — gate held
+    expect(await triggerExists("guarded")).toBe(false) // but trigger consumed
+  })
+
+  it("consumes a trigger naming a non-existent def without throwing", async () => {
+    await dropTrigger("ghost-process")
+    await processProcessTriggers(testDir, testDir) // must not throw
+    expect(await triggerExists("ghost-process")).toBe(false)
+  })
+})
+
+describe("requestProcessRun", () => {
+  it("writes a trigger file named by the basename for an existing process", async () => {
+    await writeProcessDef("requestable", { name: "requestable", command: "sleep", args: "60", enabled: "true", restart: "never" })
+
+    const result = await requestProcessRun("requestable", testDir)
+    expect(result.ok).toBe(true)
+    expect(await triggerExists("requestable")).toBe(true)
+  })
+
+  it("returns ok: false for a missing process", async () => {
+    const result = await requestProcessRun("nonexistent", testDir)
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("nonexistent")
+    expect(await triggerExists("nonexistent")).toBe(false)
   })
 })

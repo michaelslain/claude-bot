@@ -19,6 +19,7 @@ export const SESSION_FILE = join(BOT_DIR, "session-id")
 export const LAST_FIRED_FILE = join(CRONS_DIR, ".last-fired.json")
 export const RUNNING_FILE = join(CRONS_DIR, ".running.json")
 export const TRIGGER_DIR = join(CRONS_DIR, ".triggers")
+export const PROCESS_TRIGGER_DIR = join(PROCESSES_DIR, ".triggers")
 
 // ── Timeouts & intervals ────────────────────────────────────────────────────
 

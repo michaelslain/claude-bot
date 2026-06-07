@@ -1,7 +1,7 @@
 import { mkdir, writeFile, unlink } from "fs/promises"
 import { sendMessage, getSessionId } from "./session.ts"
 import { startCronScheduler, stopCronScheduler, recoverInterruptedCrons, waitForRunningJobs } from "./cron.ts"
-import { startProcesses, stopProcesses, reapOrphans } from "./process.ts"
+import { startProcesses, stopProcesses, reapOrphans, startProcessTriggers, stopProcessTriggers } from "./process.ts"
 import { heartbeatDevice, isOwner } from "../lib/owner.ts"
 import { BOT_DIR, PID_FILE, LOGS_DIR, SHUTDOWN_TIMEOUT_MS, CRONS_DIR, MEMORY_DIR, PROCESSES_DIR } from "../lib/config.ts"
 
@@ -29,6 +29,7 @@ async function removePid(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}, shutting down...`)
   stopCronScheduler()
+  stopProcessTriggers()
   await waitForRunningJobs(SHUTDOWN_TIMEOUT_MS)
   await stopProcesses()
   await removePid()
@@ -53,6 +54,12 @@ async function main(): Promise<void> {
   // independent of the bot session
   await startProcesses()
   log("Process manager started")
+
+  // Start polling for process trigger files (the symmetric counterpart of the
+  // cron trigger loop). An external program flips a process's frontmatter and
+  // drops a trigger file; this loop reconciles its runtime to match disk.
+  startProcessTriggers()
+  log("Process trigger watcher started")
 
   // Recover crons that were interrupted by the previous shutdown BEFORE starting
   // the scheduler. Recovery re-fires interrupted jobs and populates the in-memory

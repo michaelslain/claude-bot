@@ -4,7 +4,8 @@ import { readdir, readFile, writeFile, mkdir, unlink } from "fs/promises"
 import { spawn as nodeSpawn, type ChildProcess } from "child_process"
 import { openSync, closeSync } from "fs"
 import { parseFrontmatter } from "../lib/frontmatter"
-import { PROCESSES_DIR, LOGS_DIR, RESTART_BACKOFF_RESET_MS, RESTART_BACKOFF_MAX_MS } from "../lib/config.ts"
+import { isOwner } from "../lib/owner"
+import { BOT_DIR, PROCESSES_DIR, PROCESS_TRIGGER_DIR, LOGS_DIR, RESTART_BACKOFF_RESET_MS, RESTART_BACKOFF_MAX_MS, TRIGGER_CHECK_INTERVAL_MS } from "../lib/config.ts"
 
 const PIDS_SUBDIR = ".pids"
 
@@ -652,4 +653,132 @@ export async function disableProcess(name: string, dir: string = PROCESSES_DIR):
   }
 
   return { ok: true }
+}
+
+// ── Process trigger port ──────────────────────────────────────────────────────
+//
+// The symmetric counterpart of the cron trigger port (cron.ts: requestCronRun /
+// processTriggers). A generic on-disk control surface: an external program flips
+// a process's frontmatter (enabled: true|false) and drops a trigger file named
+// by the process's FILE BASENAME; the daemon reconciles that one process's live
+// runtime to match its (already-updated) on-disk frontmatter, then deletes the
+// trigger. Reuses the existing enable/disable/start functions — no duplicate
+// spawn/stop logic.
+
+let triggerInterval: ReturnType<typeof setInterval> | null = null
+
+// Use the configured trigger dir for the real processes dir; derive a sibling
+// .triggers for test/injected dirs (mirrors pidsDirFor).
+function triggerDirFor(processesDir: string): string {
+  return processesDir === PROCESSES_DIR ? PROCESS_TRIGGER_DIR : join(processesDir, ".triggers")
+}
+
+/** True when a managed process with this name has a live OS child. */
+function isRunning(name: string): boolean {
+  const mp = managed.get(name)
+  return !!(mp?.proc?.pid && isAlive(mp.proc.pid))
+}
+
+/**
+ * Write a trigger file so the daemon reconciles this process on its next poll.
+ * Symmetric counterpart of requestCronRun — used by the MCP server / external
+ * tools (which may also just drop the file directly) as a first-class API.
+ */
+export async function requestProcessRun(name: string, dir: string = PROCESSES_DIR): Promise<{ ok: boolean; error?: string }> {
+  let content: string
+  try {
+    content = await readFile(join(dir, `${name}.md`), "utf-8")
+  } catch {
+    return { ok: false, error: `No process definition found for "${name}"` }
+  }
+  const def = parseProcessFrontmatter(name, parseFrontmatter(content).frontmatter)
+  if (!def) return { ok: false, error: `Process "${name}" is missing required "command" field` }
+
+  const triggerDir = triggerDirFor(dir)
+  await mkdir(triggerDir, { recursive: true })
+  await writeFile(join(triggerDir, name), new Date().toISOString(), "utf-8")
+  return { ok: true }
+}
+
+/**
+ * Check for trigger files dropped by an external program and reconcile each
+ * named process's runtime to its on-disk frontmatter. Symmetric counterpart of
+ * cron's processTriggers: owner-gated (non-owner consumes triggers without
+ * acting), unlinks each trigger before acting, and never throws out of the loop.
+ */
+export async function processProcessTriggers(dir: string = PROCESSES_DIR, home: string = BOT_DIR): Promise<void> {
+  const triggerDir = triggerDirFor(dir)
+  let files: string[]
+  try {
+    files = await readdir(triggerDir)
+  } catch {
+    return
+  }
+
+  const triggers = files.filter(f => !f.startsWith("."))
+  if (triggers.length === 0) return
+
+  // Not the owner device: idle. Consume the trigger files so they don't pile
+  // up, but don't start/stop. Unclaimed => isOwner true => normal behavior.
+  if (!(await isOwner(home))) {
+    for (const name of triggers) {
+      try { await unlink(join(triggerDir, name)) } catch {}
+    }
+    return
+  }
+
+  for (const name of triggers) {
+    try { await unlink(join(triggerDir, name)) } catch {}
+
+    // Defense-in-depth: the trigger filename addresses a .md file by basename,
+    // so reject anything with path separators that could escape the dir.
+    if (name.includes("/") || name.includes("\\")) {
+      console.warn(`[process] Trigger with invalid name "${name}" — skipping`)
+      continue
+    }
+
+    // Resolve the basename to a def by reading its .md directly (reload from
+    // disk so we see the fresh `enabled`). Tolerate unknown/removed defs.
+    let content: string
+    try {
+      content = await readFile(join(dir, `${name}.md`), "utf-8")
+    } catch {
+      console.warn(`[process] Trigger for unknown process "${name}" — skipping`)
+      continue
+    }
+    const def = parseProcessFrontmatter(name, parseFrontmatter(content).frontmatter)
+    if (!def) {
+      console.warn(`[process] Trigger for "${name}" missing required "command" — skipping`)
+      continue
+    }
+
+    // Reconcile runtime ↔ disk using the existing enable/disable/start funcs.
+    const running = isRunning(def.name)
+    if (def.enabled && !running) {
+      console.log(`[process] Trigger starting: ${name}`)
+      await enableProcess(name, dir)
+      startProcess(def.name)
+    } else if (!def.enabled && running) {
+      console.log(`[process] Trigger stopping: ${name}`)
+      await disableProcess(name, dir)
+    }
+    // else: runtime already matches disk — no-op
+  }
+}
+
+/**
+ * Start polling for process trigger files. Mirror of the cron trigger loop in
+ * startCronScheduler — a single interval that reconciles triggered processes.
+ */
+export function startProcessTriggers(dir: string = PROCESSES_DIR): void {
+  if (triggerInterval !== null) return
+  triggerInterval = setInterval(() => { processProcessTriggers(dir) }, TRIGGER_CHECK_INTERVAL_MS)
+}
+
+/** Stop the process trigger poll loop. Mirror of stopCronScheduler's clear. */
+export function stopProcessTriggers(): void {
+  if (triggerInterval !== null) {
+    clearInterval(triggerInterval)
+    triggerInterval = null
+  }
 }
