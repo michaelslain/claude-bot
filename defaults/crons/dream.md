@@ -7,6 +7,18 @@ catchup: true
 
 Consolidate the memory graph at `~/.claude-bot/memory/` into an atomic, densely-linked zettelkasten. The graph may be in a broken state (oversized files, OOM-causing notes) — be defensive. Walk the directory file-by-file via Bash; do NOT call `mcp__claude-bot__recall` with broad queries (it materializes all results and OOMs on bloated graphs), and do NOT call `mcp__claude-bot__dream_run` (it recursively calls back into this same session and crashes).
 
+## Step 0: Scope to what changed since the last dream
+
+Before surveying everything, get just the notes that changed since the previous dream run, so you focus on new material instead of re-reading the whole graph every hour:
+
+```bash
+bismuth checkpoint diff dream --dir ~/.claude-bot/memory
+```
+
+This prints JSON `{ base, head, files: [{status, path}, …] }` (it also snapshots the memory dir to git first, so it's revertable). If `base` is `null` this is the first run — treat every note as new and do the full pass below. Otherwise **prioritize the listed `files`** (the added/modified/deleted notes) for consolidation, merging, and backlinking; you do NOT need to re-examine unchanged notes. The size/bloat defense in Steps 1–2 is still a safety net — run it whenever the graph looks bloated.
+
+If `bismuth` isn't found on PATH, skip this step and fall back to the full survey below.
+
 ## Step 1: Survey by size
 
 Run this Bash command to list every note with its byte size, biggest first:
@@ -67,6 +79,16 @@ A note is a candidate for deletion if BOTH:
 
 Connected notes survive longer because they're part of the graph. Don't delete just because old — only if old AND isolated AND not timeless.
 
+## Step 6: Advance the checkpoint
+
+Do this LAST, after all consolidation — it records how far you got so the next dream only sees newer changes:
+
+```bash
+bismuth checkpoint advance dream --dir ~/.claude-bot/memory
+```
+
+(Skip if `bismuth` isn't on PATH.)
+
 ## Naming
 
 Short kebab-case (`cron-orphaned-processes`, `pi-deploy-flow`, `vault-task-format`). Add `[[backlinks]]` aggressively.
@@ -78,6 +100,7 @@ You may ONLY touch notes under `~/.claude-bot/memory/`. You may:
 - Split, merge, reorganize, rename
 - Add backlinks
 - Run `ls`, `du`, `head`, `tail`, `grep`, `wc` against the memory dir for triage
+- Run `bismuth checkpoint diff/advance dream --dir ~/.claude-bot/memory` (Steps 0 + 6 — it only reads/snapshots the memory dir)
 
 DO NOT under any circumstances:
 - Modify files in `~/.claude-bot/crons/` (do not enable, disable, or edit cron jobs)
