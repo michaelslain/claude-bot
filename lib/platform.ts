@@ -110,6 +110,21 @@ export async function reloadDaemon(configPath: string, config: string): Promise<
   return { ok: true }
 }
 
+/** Restart the running daemon IN PLACE without rewriting its config — for code updates
+ *  (after a `git pull` + `bun install`). macOS: `launchctl kickstart -k` bounces the loaded
+ *  service; Linux: `systemctl --user restart`. Requires the service already installed. */
+export function restartDaemon(): { ok: boolean; error?: string } {
+  if (IS_LINUX) {
+    const r = spawnSync("systemctl", ["--user", "restart", SYSTEMD_SERVICE_NAME])
+    if (r.status !== 0) return { ok: false, error: `systemctl restart failed: ${r.stderr?.toString()}` }
+    return { ok: true }
+  }
+  const uid = process.getuid?.() ?? 0
+  const r = spawnSync("launchctl", ["kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`])
+  if (r.status !== 0) return { ok: false, error: `launchctl kickstart failed: ${r.stderr?.toString()}` }
+  return { ok: true }
+}
+
 // ── Daemon-process identity ──────────────────────────────────────────────────
 
 /**
